@@ -25,6 +25,25 @@ node devstack/seed.mjs https://github.com/<org>/<repo>
 `seed.mjs` creates a connection + hunt (scope = that repo), starts a run through the
 gateway, streams the live log until the run finishes, then prints the findings.
 
+## What you'll see
+
+The live log shows each stage of the pipeline:
+
+```
+[info] intake: validating scope and budget
+[info] recon: discovering attack surface
+[info] synthesis: attacker brain proposing hypotheses
+[info] validate: JEV judges scoring plausibility
+[info] exploit: live exploitation against target
+[info] verify: independent N/N reproduction
+[info] root_cause: tracing exploit to root cause
+[info] report: generating findings
+```
+
+The exploit stage proves hypotheses by execution — booting the target, firing a
+PoC, observing the response, and adapting. The OS-level egress boundary ensures
+all network traffic stays within the declared scope.
+
 ## The model
 
 The only thing not local is the LLM. By default the stack points at the shared qwen

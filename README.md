@@ -35,32 +35,73 @@ console / CLI ──▶ worker (auth, gateway) ──▶ Hunter ──▶ Redis 
 
 ## What actually runs today
 
-Repository access is deferred, so three of the eight stages are honest, explicit
-stubs rather than fabricated output — **recon** (needs code and docs), **chain**
-(needs multiple confirmed findings), and **root_cause** (needs source to trace an
-exploit back to). They log why they are skipped and advance.
+The full eight-stage pipeline is built and tested:
 
-The rest is real: the **attacker brain** proposes one reconnaissance-class
-hypothesis against the declared scope (there is no code yet to ground anything
-riskier in), the **Plausibility Judge** scores it, a non-destructive probe runs
-against the declared target through a scope-enforcing `fetch`, the **Success
-Adjudicator** reads the result, and an independent reproduction — interpreted by
-the **verifier brain**, a different model — has to agree N/N (`VERIFY_N`,
-default 3) via the **Verification Judge** before anything is promoted. A run that
-confirms nothing promotes nothing. Every JEV gate's verdict is persisted
-(`hunter_verdicts`), so a promoted finding carries a full decision trail.
+1. **intake** — validate scope, budget, credentials
+2. **recon** — discover attack surface (stub without repo access)
+3. **synthesis** — attacker brain proposes hypotheses
+4. **validate** — JEV judges score plausibility
+5. **exploit** — live exploitation against running target (new)
+6. **verify** — independent N/N reproduction
+7. **root_cause** — trace exploit to root cause (stub without repo access)
+8. **report** — generate findings with PoC and remediation
 
-**A known gap:** scope enforcement (`src/scope.ts`) is application-level today —
-every stage's outbound call goes through a `fetch` wrapper that refuses anything
-outside the declared hosts. It is *not* yet an OS-level network boundary: Node's
-permission model restricts the filesystem and child processes but has no network
-flag, so a compromised stage could still open a raw socket. What runs inside the
-sandbox today is code this service shipped, not arbitrary code, so the wrapper is
-a real control for that. An OS-level egress boundary is required before anything
-less trusted — repo-derived code, or a fully autonomous request-crafting loop —
-runs in there, and is not built yet.
+The **attacker brain** proposes hypotheses against the declared scope, the
+**Plausibility Judge** scores them, and the **exploit stage** proves them by
+execution — booting the target, firing a PoC, observing, and adapting. An
+independent reproduction — interpreted by the **verifier brain**, a different
+model — has to agree N/N (`VERIFY_N`, default 3) via the **Verification Judge**
+before anything is promoted. A run that confirms nothing promotes nothing. Every
+JEV gate's verdict is persisted (`hunter_verdicts`), so a promoted finding
+carries a full decision trail.
 
-## Run it
+**OS-level egress boundary:** `src/egress-proxy.ts` provides a scoped egress
+proxy that enforces the declared scope on all outbound HTTP/HTTPS traffic. The
+sandboxed child routes all network traffic through this proxy via `HTTP_PROXY`/
+`HTTPS_PROXY` environment variables, providing a true network boundary that
+catches all egress, not just `fetch()` calls.
+
+## Run it locally
+
+The easiest way to run Hunter locally is with Docker Compose. This spins up the
+full stack: Redis, a dev control-plane (D1-over-SQLite + gateway), and the Hunter
+engine.
+
+```bash
+# Clone the repo
+git clone https://github.com/FrostWolfAI/frostwolf-hunter-engine.git
+cd frostwolf-hunter-engine
+
+# Start the full stack
+docker compose up --build
+
+# In another shell, start a hunt against any public repo
+node devstack/seed.mjs https://github.com/<org>/<repo>
+```
+
+`seed.mjs` creates a connection + hunt (scope = that repo), starts a run through
+the gateway, streams the live log until the run finishes, then prints the findings.
+
+### Model configuration
+
+The only thing not local is the LLM. By default the stack points at the shared
+qwen endpoint. Override it for your own gateway or a local one:
+
+```bash
+# .env next to docker-compose.yml
+MATTERAI_BASE_URL=http://host.docker.internal:11434/v1   # e.g. a local Ollama
+ATTACKER_MODEL=qwen2.5-coder
+VERIFIER_MODEL=qwen2.5-coder
+JUDGE_MODEL=qwen2.5-coder
+VERIFY_N=1
+AGENT_RUNTIME=internal     # or "orbcode"
+HUNTER_SECRET=dev-secret
+```
+
+To make it fully offline, run a local OpenAI-compatible server (Ollama, llama.cpp,
+vLLM) and point `MATTERAI_BASE_URL` at it.
+
+### Run without Docker
 
 ```bash
 cp .env.example .env     # REDIS_URL, HUNTER_SECRET, MATTERAI_API_KEY, model names
@@ -92,9 +133,11 @@ docker build -t frostwolf-hunter . && docker run --env-file .env -p 8080:8080 fr
 | `src/queue.ts` | The run queue, as a native Redis stream + consumer group. |
 | `src/runner.ts` | One run: spawn the child, relay events/verdicts/findings, write status. |
 | `src/sandbox.ts` | The sandboxed child process, and the credentials handoff. |
+| `src/egress-proxy.ts` | OS-level egress boundary: scoped proxy enforcing the allowlist. |
+| `src/exploit.ts` | Live exploitation: PoC crafting, execution, observation, adaptation. |
 | `src/pipeline.ts`, `src/state-machine.ts`, `src/stages/` | What runs inside the sandbox: the eight stages. |
 | `src/judge.ts` | The JEV judge call: structured verdict, fail-closed on anything that doesn't parse. |
-| `src/scope.ts` | The egress allowlist check — see the caveat above. |
+| `src/scope.ts` | The egress allowlist check. |
 | `src/models/` | `ModelClient`, the matterai.so client, and the Clef stub. |
 | `src/live.ts` | The live log in Redis. |
 | `src/d1.ts`, `src/data/` | D1 via the worker, and the queries. |
