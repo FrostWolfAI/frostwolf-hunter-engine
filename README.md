@@ -40,20 +40,33 @@ The full eight-stage pipeline is built and tested:
 1. **intake** — validate scope, budget, credentials
 2. **recon** — discover attack surface (stub without repo access)
 3. **synthesis** — attacker brain proposes hypotheses
-4. **validate** — JEV judges score plausibility
-5. **exploit** — live exploitation against running target (new)
+4. **validate** — JEV judges score plausibility, then adjudicate against the real code
+5. **exploit** — attacker brain constructs a concrete proof of impact, JEV adjudicates it
 6. **verify** — independent N/N reproduction
 7. **root_cause** — trace exploit to root cause (stub without repo access)
 8. **report** — generate findings with PoC and remediation
 
 The **attacker brain** proposes hypotheses against the declared scope, the
-**Plausibility Judge** scores them, and the **exploit stage** proves them by
-execution — booting the target, firing a PoC, observing, and adapting. An
-independent reproduction — interpreted by the **verifier brain**, a different
-model — has to agree N/N (`VERIFY_N`, default 3) via the **Verification Judge**
-before anything is promoted. A run that confirms nothing promotes nothing. Every
-JEV gate's verdict is persisted (`hunter_verdicts`), so a promoted finding
-carries a full decision trail.
+**Plausibility Judge** scores them, and **validate** rules whether the flaw is
+real against the cited source. **exploit** then asks a harder question: given
+that the flaw is real, construct the concrete attacker input that would trigger
+it and trace it through the actual code to its impact — grounded reasoning
+against the real cloned repository (via the same agent substrate recon and
+synthesis use), not a live request against a booted target. A different judge
+rules on that specific construction, not the underlying claim. An independent
+reproduction — interpreted by the **verifier brain**, a different model — has to
+agree N/N (`VERIFY_N`, default 3) via the **Verification Judge** before anything
+is promoted. A run that confirms nothing promotes nothing. Every JEV gate's
+verdict is persisted (`hunter_verdicts`), so a promoted finding carries a full
+decision trail, including the constructed proof.
+
+**What this is not, yet:** nothing here boots a target, opens a socket, or runs
+a command against the target. There is no live PoC, only a constructed one. A
+real live-fire PoC needs a sandboxed execution surface this run can reach safely
+— a container with no host access, and a decision about whether it gets network
+egress at all — which does not exist. The `bash` tool (`src/sandbox-exec.ts`,
+below) is a real, working, container-isolated command runner, but it is wired to
+the generator stages (recon/synthesis exploring the checkout), not to `exploit`.
 
 **OS-level egress boundary:** `src/egress-proxy.ts` provides a scoped egress
 proxy that enforces the declared scope on all outbound HTTP/HTTPS traffic. The
@@ -134,7 +147,7 @@ docker build -t frostwolf-hunter . && docker run --env-file .env -p 8080:8080 fr
 | `src/runner.ts` | One run: spawn the child, relay events/verdicts/findings, write status. |
 | `src/sandbox.ts` | The sandboxed child process, and the credentials handoff. |
 | `src/egress-proxy.ts` | OS-level egress boundary: scoped proxy enforcing the allowlist. |
-| `src/exploit.ts` | Live exploitation: PoC crafting, execution, observation, adaptation. |
+| `src/exploit.ts` | Proof of impact: the attacker model constructs a concrete demonstration, grounded in the real code; no live execution. |
 | `src/pipeline.ts`, `src/state-machine.ts`, `src/stages/` | What runs inside the sandbox: the eight stages. |
 | `src/judge.ts` | The JEV judge call: structured verdict, fail-closed on anything that doesn't parse. |
 | `src/scope.ts` | The egress allowlist check. |

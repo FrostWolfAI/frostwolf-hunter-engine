@@ -103,7 +103,8 @@ describe("processRun — white-box discovery", () => {
     expect(ended).toEqual(["completed"]);
 
     // The full decision trail is persisted: plausibility, success adjudication,
-    // then one verification per independent reproduction.
+    // the exploit stage's proof adjudication, then one verification per
+    // independent reproduction.
     const verdicts = await env.DB.prepare(
       "SELECT gate FROM hunter_verdicts WHERE run_id = ?1 ORDER BY created_at",
     )
@@ -112,6 +113,7 @@ describe("processRun — white-box discovery", () => {
     expect(verdicts.results.map((v) => v.gate)).toEqual([
       "plausibility_judge",
       "success_adjudicator",
+      "exploit_adjudicator",
       "verification_judge",
       "verification_judge",
     ]);
@@ -162,6 +164,66 @@ describe("processRun — white-box discovery", () => {
       .bind(run.id)
       .first<{ status: string }>();
     expect(h?.status).toBe("falsified");
+  });
+
+  it("drops a confirmed hypothesis the attacker brain cannot turn into a concrete proof", async () => {
+    const env = memoryEnv();
+    const { run } = await seed(env);
+    const result = await processRun(run.id, {
+      store: createStore(env),
+      ...baseToolDeps,
+      live: fakeLive().live,
+      spawn: scriptedSpawner({ provable: false }),
+      credentials: FAKE_CREDENTIALS,
+      timeoutMs: TIMEOUT_MS,
+      prepareRepo: fixturePrepare,
+    });
+    expect(result.findings).toBe(0);
+    const h = await env.DB.prepare("SELECT status FROM hunter_hypotheses WHERE run_id = ?1")
+      .bind(run.id)
+      .first<{ status: string }>();
+    expect(h?.status).toBe("falsified");
+  });
+
+  it("drops a confirmed hypothesis whose constructed proof the judge rejects", async () => {
+    const env = memoryEnv();
+    const { run } = await seed(env);
+    const result = await processRun(run.id, {
+      store: createStore(env),
+      ...baseToolDeps,
+      live: fakeLive().live,
+      // The attacker brain constructs something, but the exploit judge is not
+      // convinced it actually traverses the cited code to the claimed impact.
+      spawn: scriptedSpawner({ exploitAdjudicator: "fail" }),
+      credentials: FAKE_CREDENTIALS,
+      timeoutMs: TIMEOUT_MS,
+      prepareRepo: fixturePrepare,
+    });
+    expect(result.findings).toBe(0);
+    const h = await env.DB.prepare("SELECT status FROM hunter_hypotheses WHERE run_id = ?1")
+      .bind(run.id)
+      .first<{ status: string }>();
+    expect(h?.status).toBe("falsified");
+  });
+
+  it("carries the constructed proof into the promoted finding's evidence", async () => {
+    const env = memoryEnv();
+    const { run } = await seed(env);
+    const result = await processRun(run.id, {
+      store: createStore(env),
+      ...baseToolDeps,
+      live: fakeLive().live,
+      spawn: scriptedSpawner(),
+      credentials: FAKE_CREDENTIALS,
+      timeoutMs: TIMEOUT_MS,
+      prepareRepo: fixturePrepare,
+    });
+    expect(result.findings).toBe(1);
+    const findings = await listFindings(env, TENANT);
+    const finding = await getFinding(env, TENANT, findings[0]!.id);
+    expect(finding?.evidence).toContain("Proof of impact");
+    expect(finding?.evidence).toContain("GET /api/profile");
+    expect(finding?.evidence).toContain("victim's profile data");
   });
 
   it("falsifies when the independent verifier does not reproduce N/N", async () => {

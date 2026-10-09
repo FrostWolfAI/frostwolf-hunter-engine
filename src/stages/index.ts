@@ -15,10 +15,10 @@
  */
 
 import { account } from "../agent.js";
-import { exploit, type ExploitConfig } from "../exploit.js";
+import { constructProof, type ExploitProof } from "../exploit.js";
 import { parseLooseJson } from "../json.js";
 import { readRepoFile } from "../repo-read.js";
-import { scopeHosts, scopeRepo } from "../scope.js";
+import { scopeRepo } from "../scope.js";
 import type { RunContext, Stage } from "../state-machine.js";
 import type { Finding, Hypothesis } from "../types.js";
 
@@ -45,6 +45,8 @@ interface RichHypothesis {
   readonly mechanism: string;
   readonly impact: string;
   readonly evidence: string;
+  /** Set once `exploitStage` gets a judge-adjudicated construction past it. */
+  readonly proof?: ExploitProof;
 }
 
 const SEVERITIES: readonly Severity[] = ["critical", "high", "medium", "low"];
@@ -372,51 +374,59 @@ const validate: Stage = {
   },
 };
 
-// --- Stage 3b — Live exploitation (prove by execution) ----------------------
+// --- Stage 3b — Proof of impact (construct, then adjudicate) ----------------
+//
+// `validate` ruled the flaw is real against the cited code. This asks a harder
+// question: could an attacker actually trigger it, and what happens if they do.
+// The attacker model constructs a concrete input and traces it through the real
+// code (`constructProof`, in `exploit.ts`); a judge then rules on that specific
+// construction, not the underlying claim validate already settled. A hypothesis
+// that cannot be turned into a concrete demonstration is dropped here rather than
+// carried forward on the strength of the claim alone.
 
 const exploitStage: Stage = {
   name: "exploit",
   async run(ctx) {
     const confirmed = (ctx.scratch.confirmed as RichHypothesis[] | undefined) ?? [];
     if (confirmed.length === 0) {
-      ctx.emit("info", "exploit", "nothing confirmed to exploit");
+      ctx.emit("info", "exploit", "nothing confirmed to prove impact for");
       return { ok: true };
     }
-
-    // Determine the target URL from the scope
-    const hosts = scopeHosts(ctx.job);
-    if (hosts.length === 0) {
-      ctx.emit("warn", "exploit", "no target hosts in scope; skipping live exploitation");
-      ctx.scratch.exploited = confirmed;
-      return { ok: true };
-    }
-
-    const targetUrl = `http://${hosts[0]}`;
-    ctx.emit("info", "exploit", `exploiting against ${targetUrl}`);
-
-    const config: ExploitConfig = {
-      targetUrl,
-      maxAttempts: 3,
-      timeoutMs: 10_000,
-    };
 
     const exploited: RichHypothesis[] = [];
     for (const h of confirmed) {
-      ctx.hypothesisStatus(h.code, "exploiting");
-      const result = await exploit(ctx, {
-        code: h.code,
-        target: h.component,
-        predicted_class: h.novelty_class,
-        rationale: h.mechanism,
-      }, config);
+      if (ctx.budget.exceeded()) {
+        ctx.emit("warn", "exploit", "token budget reached; stopping proof construction early");
+        break;
+      }
 
-      if (result.success) {
-        exploited.push(h);
+      ctx.hypothesisStatus(h.code, "exploiting");
+      const code = await gatherReferenced(ctx, h.files);
+      const proof = await constructProof(ctx, h, code);
+      if (proof === null) {
+        ctx.hypothesisStatus(h.code, "falsified");
+        ctx.emit("info", "exploit", `${h.code}: attacker brain could not construct a concrete proof`);
+        continue;
+      }
+
+      const judged = await ctx.judge(
+        "exploit_adjudicator",
+        "A different judge already confirmed this flaw is real in the code. Rule on THIS specific " +
+          "construction: is the attacker input concrete, and does it actually traverse the cited " +
+          "code to the claimed impact — not hand-waved, not a restatement of the mechanism?",
+        `Claim: ${h.title}\nMechanism: ${h.mechanism}\n\n` +
+          `Constructed proof:\n${JSON.stringify(proof)}\n\nCode:\n${code}`,
+      );
+      ctx.verdict("exploit_adjudicator", h.code, judged.verdict);
+      account(ctx, judged.totalTokens);
+
+      if (clearedVerdict(judged.verdict)) {
+        exploited.push({ ...h, proof });
         ctx.hypothesisStatus(h.code, "exploited");
-        ctx.emit("info", "exploit", `${h.code} exploited: ${result.evidence.slice(0, 200)}`);
+        ctx.emit("info", "exploit", `${h.code} proven (${proof.confidence} confidence): ${proof.poc.slice(0, 200)}`);
       } else {
         ctx.hypothesisStatus(h.code, "falsified");
-        ctx.emit("info", "exploit", `${h.code} not exploitable in live test`);
+        ctx.emit("info", "exploit", `${h.code}: construction did not hold up to adjudication`);
       }
     }
 
@@ -536,6 +546,13 @@ const report: Stage = {
     }
     for (const v of verified) {
       ctx.emit("info", "report", `promoting ${v.h.code}: ${v.h.title}`);
+      const proof = v.h.proof;
+      const evidence =
+        proof === undefined
+          ? v.h.evidence
+          : `${v.h.evidence}\n\n--- Proof of impact (${proof.confidence} confidence) ---\n` +
+            `Attacker input: ${proof.poc}\nCode path: ${proof.trace.join(" → ") || "(not cited)"}\n` +
+            `Impact: ${proof.impact}`;
       ctx.promote({
         title: v.h.title,
         severity: v.h.severity,
@@ -545,7 +562,7 @@ const report: Stage = {
         mechanism: v.h.mechanism,
         location: v.h.files.join(", "),
         remediation: v.remediation ?? "",
-        evidence: v.h.evidence,
+        evidence,
       });
     }
     return { ok: true };

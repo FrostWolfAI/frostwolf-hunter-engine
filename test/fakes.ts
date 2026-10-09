@@ -49,6 +49,10 @@ export interface ScriptOutcomes {
   readonly plausibility?: Verdict;
   readonly adjudicator?: Verdict;
   readonly verification?: Verdict;
+  /** Whether the attacker brain constructs a usable proof in the exploit stage. */
+  readonly provable?: boolean;
+  /** The exploit stage's judge: does the construction hold up. */
+  readonly exploitAdjudicator?: Verdict;
   /** Whether the independent verifier model says the flaw exists. */
   readonly verifierExists?: boolean;
   /** How many hypotheses synthesis proposes. Default 1. */
@@ -68,6 +72,8 @@ export function scriptedModel(outcomes: ScriptOutcomes = {}): ModelClient {
   const plausibility = outcomes.plausibility ?? "success";
   const adjudicator = outcomes.adjudicator ?? "success";
   const verification = outcomes.verification ?? "success";
+  const provable = outcomes.provable ?? true;
+  const exploitAdjudicator = outcomes.exploitAdjudicator ?? "success";
   const verifierExists = outcomes.verifierExists ?? true;
   const count = outcomes.hypotheses ?? 1;
 
@@ -78,6 +84,7 @@ export function scriptedModel(outcomes: ScriptOutcomes = {}): ModelClient {
       if (options.model === FAKE_CREDENTIALS.judgeModel) {
         if (system.includes("plausibility_judge")) return judgeReply(plausibility);
         if (system.includes("success_adjudicator")) return judgeReply(adjudicator);
+        if (system.includes("exploit_adjudicator")) return judgeReply(exploitAdjudicator);
         if (system.includes("verification_judge")) return judgeReply(verification);
         return judgeReply("inconclusive");
       }
@@ -105,6 +112,22 @@ export function scriptedModel(outcomes: ScriptOutcomes = {}): ModelClient {
               ],
             },
             40,
+          );
+        }
+        // Checked before the generic "attacker brain" match below, since the
+        // exploit stage's system prompt also contains that phrase.
+        if (system.includes("now proving a hypothesis")) {
+          return done(
+            provable
+              ? {
+                  provable: true,
+                  poc: "GET /api/profile?userId=<victim-id> with the attacker's own session cookie",
+                  trace: ["src/auth.js:10"],
+                  impact: "returns the victim's profile data to the attacker",
+                  confidence: "high",
+                }
+              : { provable: false },
+            30,
           );
         }
         if (system.includes("attacker brain")) {
