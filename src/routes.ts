@@ -194,6 +194,9 @@ async function route(
       if (id !== undefined && action === "stream" && method === "GET") {
         return streamRun(deps, tenantId, id);
       }
+      if (id !== undefined && action === "events" && method === "GET") {
+        return eventsForRun(deps, tenantId, id, request);
+      }
       break;
     }
 
@@ -245,6 +248,29 @@ async function streamRun(deps: RouteDeps, tenantId: string, runId: string): Prom
     .map((e) => `data: ${JSON.stringify({ level: e.level, stage: e.stage, message: e.message, ts: e.ts })}\n\n`)
     .join("");
   return new Response(body, { status: 200, headers });
+}
+
+/**
+ * A run's log as a plain page of JSON, for a caller that is not an `EventSource` —
+ * the console reopening a finished run, a CLI, anything that wants to page through
+ * rather than hold a connection open. Live or finished, it reads the same durable
+ * copy in D1 that `streamRun` replays from once a run is terminal, so a line is
+ * visible here the moment it is visible there.
+ */
+async function eventsForRun(
+  deps: RouteDeps,
+  tenantId: string,
+  runId: string,
+  request: Request,
+): Promise<Response> {
+  const run = await getRun(deps.env, tenantId, runId);
+  if (run === null) {
+    return errorResponse(404, "not_found", "No such run.");
+  }
+
+  const after = Number.parseInt(new URL(request.url).searchParams.get("after") ?? "0", 10);
+  const events = await listEvents(deps.env, tenantId, runId, Number.isFinite(after) ? after : 0);
+  return jsonResponse({ run, events });
 }
 
 /** Whether the request carries the shared secret. */

@@ -134,6 +134,12 @@ const VERDICT_CRITERIA: Record<JevVerdict["verdict"], string> = {
 /** Cap on the evidence handed to the decision model (its context is small). */
 const GLINER_STATE_CHARS = 6000;
 
+/** Credentials for a decision model reached through the matterai.so gateway. */
+export interface GlinerJudgeOptions {
+  readonly apiKey?: string;
+  readonly model?: string;
+}
+
 /**
  * The GLiNER2.5-Decide judge — a fast, structured JEV decision model (Fastino's
  * `glidecide` / `/v1/systemone`). It returns a `{choice, confidence}` for the
@@ -146,16 +152,30 @@ const GLINER_STATE_CHARS = 6000;
  * the LLM. It is well-suited to structured classification gates (severity, novelty)
  * where the decision maps to clear textual signals. This backend is therefore
  * selectable per deployment, not the default. Any failure is fail-closed.
+ *
+ * `baseUrl` may or may not end in `/v1`. Behind the matterai.so gateway the call
+ * is authenticated and names the model, so pass `apiKey` and `model` there; a bare
+ * decision service takes neither.
  */
-export function createGlinerJudge(baseUrl: string, fetchFn: typeof fetch = fetch): Judge {
-  const url = `${baseUrl.replace(/\/$/, "")}/v1/systemone`;
+export function createGlinerJudge(
+  baseUrl: string,
+  options: GlinerJudgeOptions = {},
+  fetchFn: typeof fetch = fetch,
+): Judge {
+  const url = `${baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "")}/v1/systemone`;
+  const apiKey = options.apiKey ?? "";
+  const model = options.model ?? "";
   return async (gate, instructions, evidence) => {
     let body: unknown;
     try {
       const response = await fetchFn(url, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          ...(apiKey.length > 0 ? { authorization: `Bearer ${apiKey}` } : {}),
+        },
         body: JSON.stringify({
+          ...(model.length > 0 ? { model } : {}),
           state: `${instructions}\n\n${evidence}`.slice(0, GLINER_STATE_CHARS),
           questions: {
             verdict: {

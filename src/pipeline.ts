@@ -112,10 +112,16 @@ export async function executeRun(
 
   const client = makeClient(credentials);
 
-  // The JEV judge backend. GLiNER2.5-Decide when configured; otherwise the LLM.
+  // The JEV judge backend: a decision model when configured, otherwise the LLM.
+  // With no dedicated decision service, the decision model is reached through the
+  // same gateway as the other roles, under the same key.
+  const viaGateway = credentials.judgeBaseUrl.length === 0;
   const judge =
-    credentials.judgeProvider === "gliner" && credentials.judgeBaseUrl.length > 0
-      ? createGlinerJudge(credentials.judgeBaseUrl)
+    credentials.judgeProvider === "gliner"
+      ? createGlinerJudge(
+          viaGateway ? credentials.aiBaseUrl : credentials.judgeBaseUrl,
+          viaGateway ? { apiKey: credentials.aiApiKey, model: credentials.judgeModel } : {},
+        )
       : createChatJudge(client, credentials.judgeModel);
 
   const ctx: RunContext = {

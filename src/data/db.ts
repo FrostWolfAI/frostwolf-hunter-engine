@@ -616,7 +616,25 @@ export async function updateRunStatus(
     )
     .run();
 
-  return (result.meta.changes ?? 0) > 0;
+  const updated = (result.meta.changes ?? 0) > 0;
+  if (updated && terminal) {
+    // A hunt is `active` while any run is in flight; the last run to finish hands
+    // it back. A stopped hunt stays stopped, and a hunt with another run still
+    // queued or running stays active.
+    await env.DB.prepare(
+      `UPDATE hunter_hunts SET status = 'idle'
+        WHERE status = 'active'
+          AND id = (SELECT hunt_id FROM hunter_runs WHERE id = ?1)
+          AND NOT EXISTS (
+            SELECT 1 FROM hunter_runs
+             WHERE hunt_id = hunter_hunts.id AND status IN ('queued', 'running')
+          )`,
+    )
+      .bind(runId)
+      .run();
+  }
+
+  return updated;
 }
 
 /** Record a promoted finding. Returns the new id, or null when the run is unknown. */

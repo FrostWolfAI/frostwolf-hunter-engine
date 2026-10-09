@@ -166,6 +166,28 @@ describe("the platform, end to end", () => {
     expect(text).toContain('"message":"live"');
   });
 
+  it("serves a finished run's log as a plain page of JSON, not just the stream", async () => {
+    const h = harness();
+    const { huntId } = await makeHunt(h);
+    const runId = await startAndRun(h, huntId, h.env);
+
+    const { run, events } = await h.json<{
+      run: { id: string; status: string };
+      events: Array<{ seq: number; message: string }>;
+    }>(await h.call("GET", `/v1/hunter/runs/${runId}/events`));
+
+    expect(run.status).toBe("completed");
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.some((e) => e.message.includes("scope locked to repository"))).toBe(true);
+
+    // Paging past the last seq returns nothing new rather than replaying.
+    const lastSeq = events[events.length - 1]!.seq;
+    const { events: rest } = await h.json<{ events: unknown[] }>(
+      await h.call("GET", `/v1/hunter/runs/${runId}/events?after=${lastSeq}`),
+    );
+    expect(rest).toHaveLength(0);
+  });
+
   it("marks the run failed when the queue is down", async () => {
     const h = harness({ failEnqueue: true });
     const { huntId } = await makeHunt(h);
@@ -192,6 +214,7 @@ describe("tenant isolation", () => {
     expect((await get(`/v1/hunter/hunts/${huntId}`)).status).toBe(404);
     expect((await get(`/v1/hunter/hunts/${huntId}/runs`)).status).toBe(404);
     expect((await get(`/v1/hunter/runs/${runId}/stream`)).status).toBe(404);
+    expect((await get(`/v1/hunter/runs/${runId}/events`)).status).toBe(404);
 
     expect((await h.call("POST", `/v1/hunter/hunts/${huntId}/start`, undefined, other)).status).toBe(404);
     expect((await h.call("POST", `/v1/hunter/hunts/${huntId}/stop`, undefined, other)).status).toBe(404);

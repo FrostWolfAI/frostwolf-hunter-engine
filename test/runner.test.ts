@@ -3,6 +3,7 @@ import {
   createConnection,
   createHunt,
   getFinding,
+  getHunt,
   getRun,
   listEvents,
   listFindings,
@@ -318,5 +319,73 @@ describe("processRun — white-box discovery", () => {
     });
     expect(result.status).toBe("failed");
     expect(result.reason).toMatch(/without finishing/);
+  });
+
+  it("returns the hunt to idle once its only run finishes", async () => {
+    const env = memoryEnv();
+    const { hunt, run } = await seed(env);
+    expect((await getHunt(env, TENANT, hunt.id))?.status).toBe("active");
+
+    await processRun(run.id, {
+      store: createStore(env),
+      ...baseToolDeps,
+      live: fakeLive().live,
+      spawn: scriptedSpawner(),
+      credentials: FAKE_CREDENTIALS,
+      timeoutMs: TIMEOUT_MS,
+      prepareRepo: fixturePrepare,
+    });
+
+    expect((await getHunt(env, TENANT, hunt.id))?.status).toBe("idle");
+  });
+
+  it("keeps the hunt active while a second run of it is still queued", async () => {
+    const env = memoryEnv();
+    const { hunt, run } = await seed(env);
+    const second = await startRun(env, TENANT, hunt.id);
+
+    await processRun(run.id, {
+      store: createStore(env),
+      ...baseToolDeps,
+      live: fakeLive().live,
+      spawn: scriptedSpawner(),
+      credentials: FAKE_CREDENTIALS,
+      timeoutMs: TIMEOUT_MS,
+      prepareRepo: fixturePrepare,
+    });
+
+    // The first run finished, but the second is still queued, so the hunt stays
+    // active rather than flipping back to idle under it.
+    expect((await getHunt(env, TENANT, hunt.id))?.status).toBe("active");
+
+    await processRun(second!.id, {
+      store: createStore(env),
+      ...baseToolDeps,
+      live: fakeLive().live,
+      spawn: scriptedSpawner(),
+      credentials: FAKE_CREDENTIALS,
+      timeoutMs: TIMEOUT_MS,
+      prepareRepo: fixturePrepare,
+    });
+
+    expect((await getHunt(env, TENANT, hunt.id))?.status).toBe("idle");
+  });
+
+  it("leaves a stopped hunt stopped when its run finishes afterwards", async () => {
+    const env = memoryEnv();
+    const { hunt, run } = await seed(env);
+    await stopHunt(env, TENANT, hunt.id);
+
+    await processRun(run.id, {
+      store: createStore(env),
+      ...baseToolDeps,
+      live: fakeLive().live,
+      spawn: scriptedSpawner(),
+      credentials: FAKE_CREDENTIALS,
+      timeoutMs: TIMEOUT_MS,
+      prepareRepo: fixturePrepare,
+    });
+
+    expect((await getHunt(env, TENANT, hunt.id))?.status).toBe("stopped");
   });
 });
