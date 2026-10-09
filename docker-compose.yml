@@ -1,0 +1,66 @@
+# Full local FrostWolf Hunter stack for end-to-end testing — no Cloudflare, no GCP.
+#
+#   docker compose up --build
+#   node devstack/seed.mjs https://github.com/<org>/<repo>   # start a hunt, watch it
+#
+# Three services: Redis (queue + live log), a dev control-plane standing in for the
+# Cloudflare worker (D1-over-SQLite + the /v1/hunter gateway), and the Hunter engine.
+# The only thing not local is the model endpoint — point MATTERAI_BASE_URL at your
+# own gateway (defaults to the shared qwen endpoint) or a local Ollama/llama.cpp.
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  control-plane:
+    build:
+      context: .
+      dockerfile: devstack/Dockerfile
+    environment:
+      PORT: "8787"
+      HUNTER_SECRET: ${HUNTER_SECRET:-dev-secret}
+      HUNTER_URL: http://hunter:8080
+      DB_PATH: /data/hunter.db
+    volumes:
+      - d1-data:/data
+    ports:
+      - "8787:8787" # the gateway + /internal/d1, reachable from the host
+    depends_on:
+      - hunter
+
+  hunter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PORT: "8080"
+      REDIS_URL: redis://redis:6379
+      HUNTER_SECRET: ${HUNTER_SECRET:-dev-secret}
+      WORKER_URL: http://control-plane:8787
+      # Model endpoint (OpenAI-compatible). Defaults to the shared qwen gateway.
+      MATTERAI_BASE_URL: ${MATTERAI_BASE_URL:-https://qwen38cyber.frostwolf.app/v1}
+      MATTERAI_API_KEY: ${MATTERAI_API_KEY:-none}
+      ATTACKER_MODEL: ${ATTACKER_MODEL:-Qwen3.8-27B-abliterated-cyber-preview-MTP-Q4_K_M.gguf}
+      VERIFIER_MODEL: ${VERIFIER_MODEL:-Qwen3.8-27B-abliterated-cyber-preview-MTP-Q4_K_M.gguf}
+      JUDGE_MODEL: ${JUDGE_MODEL:-Qwen3.8-27B-abliterated-cyber-preview-MTP-Q4_K_M.gguf}
+      VERIFY_N: ${VERIFY_N:-1}
+      CONCURRENCY: ${CONCURRENCY:-1}
+      # Generator runtime: "internal" (built-in agent) or "orbcode".
+      AGENT_RUNTIME: ${AGENT_RUNTIME:-internal}
+      # JEV judge backend: "chat" (LLM, default) or "gliner" (GLiNER2.5-Decide).
+      JUDGE_PROVIDER: ${JUDGE_PROVIDER:-chat}
+      JUDGE_BASE_URL: ${JUDGE_BASE_URL:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis-data: {}
+  d1-data: {}
