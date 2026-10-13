@@ -115,6 +115,7 @@ export async function executeRun(
             models: [credentials.attackerModel, credentials.verifierModel],
             execute: false,
             timeoutMs: 300_000,
+            scratchDir: input.scratchDir,
           },
           repoDir,
           (level, stage, message) => emit(level, stage, message),

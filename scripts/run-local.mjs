@@ -16,6 +16,7 @@
 import { writeFileSync } from "node:fs";
 import { cloneRepo } from "../dist/repo.js";
 import { executeRun } from "../dist/pipeline.js";
+import { resolveOrbcodeBin } from "../dist/orbcode-bin.js";
 
 const repoUrl = process.argv[2];
 const baseUrl = process.argv[3] ?? process.env.MATTERAI_BASE_URL;
@@ -52,10 +53,13 @@ const credentials = {
         : process.env.AGENT_RUNTIME === "codex"
           ? "codex"
           : "orbcode", // default
-  orbcodeBin: process.env.ORBCODE_BIN ?? "",
+  orbcodeBin: resolveOrbcodeBin(process.env.ORBCODE_BIN),
 };
 if (credentials.agentRuntime === "orbcode" && credentials.orbcodeBin.length === 0) {
-  console.error("AGENT_RUNTIME=orbcode (the default) needs ORBCODE_BIN set to bin/orbcode.js.");
+  console.error(
+    `AGENT_RUNTIME=orbcode (the default) needs ORBCODE_BIN pointing at an existing bin/orbcode.js ` +
+      `(ORBCODE_BIN=${process.env.ORBCODE_BIN ?? "<unset>"}), or @matterailab/orbcode installed.`,
+  );
   process.exit(2);
 }
 console.log(

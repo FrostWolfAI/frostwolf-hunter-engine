@@ -75,6 +75,12 @@ export interface RunInput {
    */
   readonly repoDir: string | null;
   /**
+   * The one directory the child may write, created by the parent per run and
+   * deleted when it ends: the orbcode runtime's config and result files. Null
+   * when the runtime needs no scratch (the built-in loop).
+   */
+  readonly scratchDir: string | null;
+  /**
    * URL of the scoped egress proxy, or null. When set, the child routes all
    * HTTP/HTTPS traffic through this proxy, which enforces the declared scope.
    */

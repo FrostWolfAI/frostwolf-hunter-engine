@@ -42,17 +42,47 @@ export type Spawner = (
   onMessage: (message: ChildMessage) => void,
 ) => RunHandle;
 
-/** The environment and flags every sandboxed child is started with. */
+/**
+ * The environment and flags every sandboxed child is started with.
+ *
+ * `scratchDir` is the one directory the child may write — the orbcode runtime's
+ * config and result files. `orbcodeRoot`, when set, names the orbcode install
+ * directory and marks this as an orbcode run: the built-in loop passes null and
+ * keeps the no-spawn, no-addon, no-extra-read guarantee.
+ *
+ * Node propagates the permission model to child processes through `NODE_OPTIONS`,
+ * so a grandchild — the orbcode harness the child spawns — inherits `--permission`
+ * and this exact allow-list. orbcode therefore needs three further grants to run
+ * at all: read on its own install tree (to load its code and node_modules),
+ * `--allow-addons` (its native dependencies, e.g. the canvas binding pdfjs pulls
+ * in, load through N-API, which the permission model blocks by default), and
+ * `--allow-child-process` (it shells out to `git` and `rg`). Its own state —
+ * sessions, usage, settings — is redirected into `scratchDir` via
+ * `MATTERAI_CONFIG_DIR` in orbcode.ts, so no write grant beyond scratch is needed.
+ */
 export function sandboxOptions(
   codeDir: string,
   repoDir?: string | null,
   proxyUrl?: string | null,
+  scratchDir?: string | null,
+  orbcodeRoot?: string | null,
 ): Pick<ForkOptions, "env" | "execArgv"> {
   const reads = [`--allow-fs-read=${codeDir}/*`];
   if (repoDir !== undefined && repoDir !== null) {
     // Read-only, and read is the only grant: the child still cannot write to the
     // checkout or spawn anything from it. It reads source as text; it never runs it.
     reads.push(`--allow-fs-read=${repoDir}/*`);
+  }
+  const writes: string[] = [];
+  if (scratchDir !== undefined && scratchDir !== null) {
+    reads.push(`--allow-fs-read=${scratchDir}/*`);
+    writes.push(`--allow-fs-write=${scratchDir}`);
+  }
+  const orbcode = orbcodeRoot !== undefined && orbcodeRoot !== null && orbcodeRoot.length > 0;
+  if (orbcode) {
+    // The orbcode harness runs as a grandchild under this same inherited
+    // allow-list; it must be able to read its own code and dependencies.
+    reads.push(`--allow-fs-read=${orbcodeRoot}/*`);
   }
 
   const env: Record<string, string> = {};
@@ -63,11 +93,33 @@ export function sandboxOptions(
     env.http_proxy = proxyUrl;
     env.https_proxy = proxyUrl;
   }
+  // PATH carries no secret, and the harness process the orbcode runtime spawns
+  // needs it to find `git` and `rg`. Everything else stays out of the child.
+  if (process.env.PATH !== undefined && process.env.PATH.length > 0) {
+    env.PATH = process.env.PATH;
+  }
 
-  return {
-    env,
-    execArgv: ["--permission", ...reads, `--max-old-space-size=${RUN_HEAP_MB}`],
-  };
+  const execArgv = ["--permission", ...reads, ...writes];
+  if (orbcode) {
+    // Only the orbcode runtime spawns a harness and loads native addons; the
+    // built-in loop gets neither, so its no-spawn guarantee is unchanged.
+    execArgv.push("--allow-child-process", "--allow-addons");
+  }
+  execArgv.push(`--max-old-space-size=${RUN_HEAP_MB}`);
+  return { env, execArgv };
+}
+
+/**
+ * Resolve a path the permission model will check, falling back to the given path
+ * when it does not exist. A missing orbcode install must not crash the spawn — the
+ * child fails that run closed with `orbcode_unavailable` instead.
+ */
+function resolveExisting(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
 }
 
 /** The real spawner: one sandboxed child process per run. */
@@ -78,8 +130,17 @@ export function forkSpawner(): Spawner {
 
   return (input, onMessage) => {
     const repoDir = input.repoDir === null ? undefined : realpathSync(input.repoDir);
+    const scratchDir = input.scratchDir === null ? undefined : realpathSync(input.scratchDir);
+    // The orbcode harness is spawned from the sandboxed child and inherits its
+    // permission model, so its install tree (two levels up from `bin/orbcode.js`)
+    // must be granted read. Only an orbcode run resolves one; anything else leaves
+    // it undefined and gets no spawn, addon, or extra-read grant.
+    const orbcodeRoot =
+      input.credentials.agentRuntime === "orbcode" && input.credentials.orbcodeBin.length > 0
+        ? resolveExisting(dirname(dirname(input.credentials.orbcodeBin)))
+        : undefined;
     const child = fork(childPath, [], {
-      ...sandboxOptions(dirname(childPath), repoDir, input.proxyUrl),
+      ...sandboxOptions(dirname(childPath), repoDir, input.proxyUrl, scratchDir, orbcodeRoot),
       stdio: ["ignore", "inherit", "inherit", "ipc"],
     });
 
@@ -89,7 +150,7 @@ export function forkSpawner(): Spawner {
       child.once("error", () => resolve());
     });
     // Send the realpath so the child reads the same path the allowance names.
-    child.send({ ...input, repoDir: repoDir ?? null });
+    child.send({ ...input, repoDir: repoDir ?? null, scratchDir: scratchDir ?? null });
 
     return {
       exited,

@@ -57,10 +57,13 @@ process.on("message", (message: RunInput | ParentMessage) => {
   }
   started = true;
   executeRun(message as RunInput, send, { broker }).catch((error: unknown) => {
+    const reason = error instanceof Error ? error.message : "run crashed";
+    // Surface the crash in the run's own event log before reporting done, so a
+    // failure inside the child is visible wherever the run's log is replayed.
     send({
-      type: "done",
-      ok: false,
-      reason: error instanceof Error ? error.message : "run crashed",
+      type: "event",
+      event: { level: "error", stage: "run", message: `run crashed: ${reason}`, ts: new Date().toISOString() },
     });
+    send({ type: "done", ok: false, reason });
   });
 });

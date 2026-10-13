@@ -33,6 +33,7 @@ import { createModelClient } from "../dist/models/index.js";
 import { cloneRepo } from "../dist/repo.js";
 import { disabledWebSearch } from "../dist/web-search.js";
 import { createCommandRunner } from "../dist/sandbox-exec.js";
+import { resolveOrbcodeBin } from "../dist/orbcode-bin.js";
 
 const repo = process.argv[2];
 const org = process.env.FW_ORG_ID;
@@ -49,12 +50,19 @@ const runtime =
   : process.env.AGENT_RUNTIME === "codex" ? "codex"
   : "orbcode"; // default
 
+// Resolved to an absolute, existing path (or "") portably across OSes.
+const orbcodeBin = resolveOrbcodeBin(process.env.ORBCODE_BIN);
+
 const missing = [];
 if (!repo) missing.push("<repoUrl> argument");
 if (!org) missing.push("FW_ORG_ID");
 if (!secret) missing.push("HUNTER_SECRET");
 if (!process.env.MATTERAI_API_KEY) missing.push("MATTERAI_API_KEY");
-if (runtime === "orbcode" && !process.env.ORBCODE_BIN) missing.push("ORBCODE_BIN (orbcode is the default runtime)");
+if (runtime === "orbcode" && !orbcodeBin)
+  missing.push(
+    `ORBCODE_BIN pointing at an existing bin/orbcode.js (orbcode is the default runtime; ` +
+      `ORBCODE_BIN=${process.env.ORBCODE_BIN ?? "<unset>"}), or @matterailab/orbcode installed`,
+  );
 if (missing.length > 0) {
   console.error("missing required config:\n  - " + missing.join("\n  - "));
   console.error(
@@ -78,7 +86,7 @@ const credentials = {
   costPer1kTokensUsd: Number(process.env.COST_PER_1K_TOKENS_USD ?? 0),
   maxRunTokens: Number(process.env.MAX_RUN_TOKENS ?? 2_000_000),
   agentRuntime: runtime,
-  orbcodeBin: process.env.ORBCODE_BIN ?? "",
+  orbcodeBin,
 };
 
 // The production database, reached through the gateway worker's /internal/d1.

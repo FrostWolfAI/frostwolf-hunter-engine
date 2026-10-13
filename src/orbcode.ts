@@ -77,6 +77,11 @@ export interface OrbcodeConfig {
   readonly baseUrl: string;
   /** Key for that endpoint (may be a placeholder when the endpoint needs none). */
   readonly apiKey: string;
+  /**
+   * The per-run directory the sandboxed child may write: settings and result
+   * files land here. Absent in tests, which then fall back to the OS temp dir.
+   */
+  readonly scratchDir?: string | null;
   /** Model ids to register as custom models (attacker, verifier). */
   readonly models: readonly string[];
   /** Whether edits/commands are allowed (`--yolo`). Only true inside the sandbox. */
@@ -116,20 +121,29 @@ export function createOrbcodeExplorer(
   onUsage: (tokens: number) => void = () => {},
   exec: ExecFn = realExec,
 ): Explorer {
-  const cfgDir = mkdtempSync(join(tmpdir(), "hunter-orb-"));
+  // The parent grants the child write access to exactly this directory; without
+  // it (tests, in-process runs) fall back to making one wherever it runs.
+  const cfgDir =
+    config.scratchDir !== undefined && config.scratchDir !== null && config.scratchDir.length > 0
+      ? config.scratchDir
+      : mkdtempSync(join(tmpdir(), "hunter-orb-"));
   const uniqueModels = [...new Set(config.models.filter((m) => m.length > 0))];
   writeFileSync(
     join(cfgDir, "settings.json"),
     JSON.stringify({
       model: uniqueModels[0] ?? "model",
+      // Hunter registers only what identifies and reaches the model — id,
+      // provider, endpoint, key. The context window, the output cap, and
+      // compaction belong to the generator substrate, not to Hunter: orbcode
+      // manages its own window (a custom model defaults to orbcode's own values),
+      // so Hunter declares none and cannot force premature compaction by
+      // understating one.
       customModels: uniqueModels.map((id) => ({
         id,
         name: id,
         provider: "openai-compatible",
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
-        contextWindow: 128000,
-        maxOutputTokens: 8000,
       })),
     }),
   );

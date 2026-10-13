@@ -81,4 +81,19 @@ process.send({
       readOutside: "denied",
     });
   });
+
+  it("grants the orbcode runtime its install tree, addons, and spawn — and the built-in loop none of them", () => {
+    const code = "/code";
+    const orbRoot = "/opt/orbcode";
+
+    const builtin = sandboxOptions(code);
+    expect(builtin.execArgv).not.toContain("--allow-addons");
+    expect(builtin.execArgv).not.toContain("--allow-child-process");
+    expect(builtin.execArgv).not.toContain(`--allow-fs-read=${orbRoot}/*`);
+
+    const orbcode = sandboxOptions(code, null, null, null, orbRoot);
+    expect(orbcode.execArgv).toContain(`--allow-fs-read=${orbRoot}/*`);
+    expect(orbcode.execArgv).toContain("--allow-child-process");
+    expect(orbcode.execArgv).toContain("--allow-addons");
+  });
 });

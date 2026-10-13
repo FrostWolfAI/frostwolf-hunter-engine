@@ -9,6 +9,9 @@
  * from the console, or that exceeds its budget, has its child killed.
  */
 
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { renderExec, type CommandRunner } from "./sandbox-exec.js";
 import { startEgressProxy, type EgressProxy } from "./egress-proxy.js";
 import { scopeHosts } from "./scope.js";
@@ -201,12 +204,17 @@ export async function processRun(runId: string, deps: RunnerDeps): Promise<RunRe
     }
   };
 
+  // The one writable directory the child gets: the orbcode runtime writes its
+  // model config and reads back result files here. Per run, deleted below.
+  const scratchDir = await mkdtemp(join(tmpdir(), "hunter-scratch-"));
+
   const run = deps.spawn(
     {
       job,
       credentials: deps.credentials,
       capabilities,
       repoDir: repo?.dir ?? null,
+      scratchDir,
       proxyUrl: proxy.url,
     },
     (message) => {
@@ -229,8 +237,24 @@ export async function processRun(runId: string, deps: RunnerDeps): Promise<RunRe
   await commandRunner?.dispose().catch(() => undefined);
   await proxy?.close().catch(() => undefined);
   await repo?.cleanup().catch(() => undefined);
+  await rm(scratchDir, { recursive: true, force: true }).catch(() => undefined);
 
   const result = finalise(outcome, { stopped, timedOut });
+  if (result.status === "failed" && result.reason !== undefined) {
+    // The reason a run failed is part of the run's record, not just a return
+    // value: the console replays events, and a failure with no visible cause is
+    // indistinguishable from a crash of the service itself.
+    await store
+      .appendEvents(runId, [
+        {
+          level: "error",
+          stage: "run",
+          message: `run failed: ${result.reason}`,
+          ts: new Date().toISOString(),
+        },
+      ])
+      .catch(() => undefined);
+  }
   await store.setStatus(runId, result.status, { cost_usd: cost });
   await store.meter(runId, { hunts: 1, verifications: findings });
   await live.end(runId, result.status);

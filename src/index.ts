@@ -50,6 +50,13 @@ async function main(): Promise<void> {
       "MATTERAI_API_KEY is not set — every run will fail closed at intake until it is configured.",
     );
   }
+  if (config.agentRuntime === "orbcode" && config.orbcodeBin.length === 0) {
+    console.warn(
+      `AGENT_RUNTIME=orbcode but the orbcode launcher was not found (ORBCODE_BIN=${
+        process.env.ORBCODE_BIN ?? "<unset>"
+      }). Set ORBCODE_BIN to an existing bin/orbcode.js, or install @matterailab/orbcode. Every run will fail closed with orbcode_unavailable until it resolves.`,
+    );
+  }
 
   const env = { DB: new D1Client(config) };
   const store = createStore(env);

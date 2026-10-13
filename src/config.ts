@@ -12,6 +12,8 @@
  * reason, so a misconfigured deploy is visible per-run rather than down entirely.
  */
 
+import { resolveOrbcodeBin } from "./orbcode-bin.js";
+
 /** Which inference gateway a run's model calls go through. */
 export type AiProvider = "matterai" | "clef";
 
@@ -117,7 +119,10 @@ export function loadConfig(): Config {
           : process.env.AGENT_RUNTIME === "codex"
             ? "codex"
             : "orbcode",
-    orbcodeBin: process.env.ORBCODE_BIN ?? "",
+    // Resolved to an absolute, existing path (or "" when not found) once at boot,
+    // portably across OSes. A sandboxed run child cannot touch the filesystem to
+    // check, so the parent settles this here.
+    orbcodeBin: resolveOrbcodeBin(process.env.ORBCODE_BIN),
     judgeProvider:
       process.env.JUDGE_PROVIDER === "gliner"
         ? "gliner"
