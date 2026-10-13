@@ -47,6 +47,14 @@ export interface ExploreTask {
   /** Hints the built-in agent honours; the orbcode substrate ignores them. */
   readonly maxSteps?: number;
   readonly temperature?: number;
+  /**
+   * Start a brand-new orbcode session instead of continuing the run's shared one.
+   * Independent verification sets this so it re-derives without seeing the
+   * attacker's prior reasoning. recon/synthesis/exploit leave it false and share
+   * one session (orbcode `--resume`), so the repo is explored once, not per call.
+   * The built-in agent ignores it (it keeps no session).
+   */
+  readonly fresh?: boolean;
 }
 
 /** Produces a structured result for a generator task, or null. */
@@ -126,18 +134,26 @@ export function createOrbcodeExplorer(
     }),
   );
   let counter = 0;
+  // The run's shared orbcode session. The first non-fresh call establishes it;
+  // every later non-fresh call continues it with `--resume`, so recon/synthesis/
+  // exploit explore the repo once and build on that context instead of each
+  // cold-starting and re-reading everything. A `fresh` task (verification) ignores
+  // it entirely, keeping that re-derivation independent.
+  let sharedSessionId: string | null = null;
 
   return async <T>(task: ExploreTask): Promise<T | null> => {
     const outputFile = join(cfgDir, `result-${++counter}.json`);
     const prompt =
       `${task.system}\n\n${task.task}\n\n` +
       "Produce ONLY the single JSON object the instructions ask for — no prose, no fences.";
+    const resume = !task.fresh && sharedSessionId !== null ? ["--resume", sharedSessionId] : [];
     const args = [
       "-p", prompt,
       "--model", task.model,
       "--json",
       "--require-model",
       "--output-file", outputFile,
+      ...resume,
       ...(config.execute ? ["--yolo"] : []),
     ];
 
@@ -171,6 +187,11 @@ export function createOrbcodeExplorer(
     if (!envelope.ok) {
       emit("warn", task.stage, `orbcode reported an error: ${envelope.error ?? "unknown"}`);
       return null;
+    }
+
+    // Carry the shared session forward so the next non-fresh call resumes it.
+    if (!task.fresh && typeof envelope.sessionId === "string" && envelope.sessionId.length > 0) {
+      sharedSessionId = envelope.sessionId;
     }
 
     const parsed = parseLooseJson(envelope.result);

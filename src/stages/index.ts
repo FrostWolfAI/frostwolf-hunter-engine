@@ -455,6 +455,9 @@ const verify: Stage = {
           stage: "verify",
           maxSteps: VERIFY_STEPS,
           temperature: 0.2,
+          // A fresh session: the re-derivation must not inherit the shared
+          // recon/synthesis/exploit context, or it would not be independent.
+          fresh: true,
           system:
             "You are an independent reviewer. Using the tools, decide for yourself, only from the " +
             'code, whether the named vulnerability genuinely exists. Final result MUST be ' +

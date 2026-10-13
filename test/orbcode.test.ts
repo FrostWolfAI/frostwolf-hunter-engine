@@ -83,4 +83,32 @@ describe("createOrbcodeExplorer", () => {
     const explore = createOrbcodeExplorer(base, "/repo", () => {}, () => {}, exec);
     expect(await explore({ model: "m1", system: "s", task: "t", stage: "recon" })).toBeNull();
   });
+
+  it("reuses one session across non-fresh calls and starts fresh for verification", async () => {
+    // Every orbcode run reports the same session id (resuming keeps the id).
+    const { exec, calls } = recordingExec({ ok: true, model: "m1", result: "{}", sessionId: "sess-1" });
+    const explore = createOrbcodeExplorer(base, "/repo", () => {}, () => {}, exec);
+
+    const resumeArg = (i: number) => {
+      const a = calls[i]!.args;
+      const at = a.indexOf("--resume");
+      return at === -1 ? null : a[at + 1];
+    };
+
+    // 1) recon (non-fresh): first call establishes the session, no --resume.
+    await explore({ model: "m1", system: "s", task: "t", stage: "recon" });
+    expect(resumeArg(0)).toBeNull();
+
+    // 2) synthesis (non-fresh): continues the established session.
+    await explore({ model: "m1", system: "s", task: "t", stage: "synthesis" });
+    expect(resumeArg(1)).toBe("sess-1");
+
+    // 3) verify (fresh): a new session, never resuming the shared one.
+    await explore({ model: "m2", system: "s", task: "t", stage: "verify", fresh: true });
+    expect(resumeArg(2)).toBeNull();
+
+    // 4) a later non-fresh call still resumes the shared session (fresh didn't disturb it).
+    await explore({ model: "m1", system: "s", task: "t", stage: "exploit" });
+    expect(resumeArg(3)).toBe("sess-1");
+  });
 });
