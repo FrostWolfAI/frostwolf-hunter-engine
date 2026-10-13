@@ -22,14 +22,24 @@ import { scopeRepo } from "../scope.js";
 import type { RunContext, Stage } from "../state-machine.js";
 import type { Finding, Hypothesis } from "../types.js";
 
+/** A positive integer from the environment, or the default. Lets a run trade depth
+ * for speed/cost (e.g. HUNT_MAX_QUEUED=3 for a fast pass) without changing the
+ * thorough defaults. */
+function intEnv(name: string, fallback: number): number {
+  const n = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
 const RECON_STEPS = 10;
 const VERIFY_STEPS = 8;
-const MAX_HYPOTHESES = 12;
-const MAX_QUEUED = 12;  // validate everything plausible, not just the top few
+const MAX_HYPOTHESES = intEnv("HUNT_MAX_HYPOTHESES", 12);
+/** How many cleared hypotheses go through validate -> exploit -> verify (the costly
+ * deep stages). With the judge skipped nothing prunes, so this is the main lever. */
+const MAX_QUEUED = intEnv("HUNT_MAX_QUEUED", 12);
 /** Synthesis walks the ranked surface areas, a focused pass each, for real coverage. */
-const MAX_AREAS = 6;
+const MAX_AREAS = intEnv("HUNT_MAX_AREAS", 6);
 const PER_AREA_STEPS = 9;
-const PER_AREA_HYPOTHESES = 3;
+const PER_AREA_HYPOTHESES = intEnv("HUNT_PER_AREA", 3);
 const MAX_VALIDATE_BYTES = 60 * 1024;
 
 type NoveltyClass = "A" | "B" | "C" | "D";

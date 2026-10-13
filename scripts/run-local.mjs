@@ -13,6 +13,7 @@
  * Env read: MATTERAI_BASE_URL, MATTERAI_API_KEY, ATTACKER_MODEL, VERIFIER_MODEL,
  * JUDGE_MODEL, JUDGE_PROVIDER (default skip), JUDGE_BASE_URL, VERIFY_N, AGENT_RUNTIME.
  */
+import { writeFileSync } from "node:fs";
 import { cloneRepo } from "../dist/repo.js";
 import { executeRun } from "../dist/pipeline.js";
 
@@ -107,4 +108,13 @@ for (const f of findings) {
   console.log(`  mechanism: ${f.mechanism}`);
   console.log(`  fix: ${f.remediation}`);
 }
+
+// Save the full result so it is never lost in terminal scrollback.
+const outPath = process.env.FINDINGS_OUT ?? "hunt-findings.json";
+writeFileSync(
+  outPath,
+  JSON.stringify({ repo: repoUrl, spendUsd: spend, count: findings.length, findings }, null, 2),
+);
+console.log(`\nSaved ${findings.length} finding(s) to ${outPath}`);
+
 await repo.cleanup();
