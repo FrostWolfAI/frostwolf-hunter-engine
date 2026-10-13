@@ -1,134 +1,130 @@
 /**
- * The live run log, in Redis.
+ * The live run log, in memory.
  *
- * Each line is appended to a per-run list (so a watcher who connects late can
- * replay it) and published on a per-run channel (so a connected watcher gets it as
- * it happens). The list expires; the durable copy is written to D1 in batches by
- * the runner. This keeps the high-volume live chatter off the database.
+ * A hunt is started by a direct API call and runs in this same process, so the
+ * live log lives here too: the runner `publish`es each line into a per-run buffer
+ * and notifies any open SSE stream, and a late or reconnecting watcher replays the
+ * buffer. The durable copy is written to D1 by the runner, so a finished run is
+ * served from D1 (see `routes.ts`); this buffer only backs an in-progress run and
+ * is dropped a short while after it ends. No Redis, no queue.
  */
 
-import type { Redis } from "ioredis";
 import type { RunEvent, RunStatus } from "./types.js";
-
-/** How long a run's live log is kept in Redis after its last line, in seconds. */
-const LOG_TTL_SECONDS = 24 * 60 * 60;
 
 /** How often an idle stream is pinged so a proxy does not close it, in ms. */
 const HEARTBEAT_MS = 15_000;
+/** Cap on a single run's in-memory backlog, so a long run cannot grow without bound. */
+const MAX_BUFFER = 5_000;
+/** How long a finished run's buffer is kept for a late watcher before it is dropped. */
+const FORGET_GRACE_MS = 2 * 60_000;
 
-/** Where the runner publishes. */
+/** Where the runner publishes, and where the HTTP layer streams from. */
 export interface Live {
   publish(runId: string, event: RunEvent): Promise<void>;
   end(runId: string, status: RunStatus): Promise<void>;
 }
 
-const logKey = (runId: string): string => `hunter:run:${runId}:log`;
-const channel = (runId: string): string => `hunter:run:${runId}`;
+/** The in-memory live log plus its SSE stream, shared across the one process. */
+export interface MemoryLive extends Live {
+  stream(runId: string): ReadableStream<Uint8Array>;
+}
 
-export function createLive(redis: Redis): Live {
+type Subscriber = (frame: { event?: RunEvent; end?: RunStatus }) => void;
+
+interface RunLog {
+  readonly events: RunEvent[];
+  ended: RunStatus | null;
+  readonly subscribers: Set<Subscriber>;
+}
+
+export function createMemoryLive(): MemoryLive {
+  const runs = new Map<string, RunLog>();
+  const get = (runId: string): RunLog => {
+    let log = runs.get(runId);
+    if (log === undefined) {
+      log = { events: [], ended: null, subscribers: new Set<Subscriber>() };
+      runs.set(runId, log);
+    }
+    return log;
+  };
+
   return {
     async publish(runId, event) {
-      const length = await redis.rpush(logKey(runId), JSON.stringify(event));
-      await redis.expire(logKey(runId), LOG_TTL_SECONDS);
-      await redis.publish(channel(runId), JSON.stringify({ n: length, event }));
-    },
-    async end(runId, status) {
-      // Recorded in the log as well as published, so a watcher who connects after
-      // the run has finished still sees that it is over instead of waiting.
-      const frame = JSON.stringify({ end: true, status });
-      await redis.rpush(logKey(runId), frame);
-      await redis.expire(logKey(runId), LOG_TTL_SECONDS);
-      await redis.publish(channel(runId), frame);
-    },
-  };
-}
-
-interface Frame {
-  readonly n?: number;
-  readonly event?: RunEvent;
-  readonly end?: boolean;
-}
-
-/**
- * A server-sent-event stream of a run's log: the backlog first, then live lines.
- *
- * The subscription is opened before the backlog is read, and live lines that
- * arrive during the replay are held and de-duplicated by their position in the
- * list, so a line is never dropped or sent twice. The stream closes when the run
- * ends or the watcher goes away.
- */
-export function liveStream(redis: Redis, runId: string): ReadableStream<Uint8Array> {
-  const subscriber = redis.duplicate();
-  const encoder = new TextEncoder();
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
-
-  const cleanup = (): void => {
-    clearInterval(heartbeat);
-    subscriber.quit().catch(() => undefined);
-  };
-
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const write = (text: string): void => {
-        try {
-          controller.enqueue(encoder.encode(text));
-        } catch {
-          // The watcher is gone.
-        }
-      };
-
-      let replaying = true;
-      let sent = 0;
-      let ended = false;
-      const held: Frame[] = [];
-
-      const deliver = (frame: Frame): void => {
-        if (frame.end === true) {
-          ended = true;
-          return;
-        }
-        if (frame.event !== undefined && (frame.n ?? 0) > sent) {
-          sent = frame.n ?? sent;
-          write(`data: ${JSON.stringify(frame.event)}\n\n`);
-        }
-      };
-
-      subscriber.on("message", (_channel, raw) => {
-        const frame = JSON.parse(raw) as Frame;
-        if (replaying) {
-          held.push(frame);
-        } else {
-          deliver(frame);
-          if (ended) {
-            cleanup();
-            controller.close();
-          }
-        }
-      });
-
-      await subscriber.subscribe(channel(runId));
-      write(": connected\n\n");
-
-      const backlog = await redis.lrange(logKey(runId), 0, -1);
-      backlog.forEach((raw, index) => {
-        if ((JSON.parse(raw) as Frame).end === true) {
-          ended = true;
-          return;
-        }
-        sent = index + 1;
-        write(`data: ${raw}\n\n`);
-      });
-
-      replaying = false;
-      held.forEach(deliver);
-
-      if (ended) {
-        cleanup();
-        controller.close();
-        return;
+      const log = get(runId);
+      log.events.push(event);
+      if (log.events.length > MAX_BUFFER) {
+        log.events.shift();
       }
-      heartbeat = setInterval(() => write(": ping\n\n"), HEARTBEAT_MS);
+      for (const notify of log.subscribers) {
+        notify({ event });
+      }
     },
-    cancel: cleanup,
-  });
+
+    async end(runId, status) {
+      const log = get(runId);
+      log.ended = status;
+      for (const notify of log.subscribers) {
+        notify({ end: status });
+      }
+      // The finished run is served from D1 from now on; drop the buffer after a
+      // grace period so a watcher mid-reconnect still sees the final frames.
+      const timer = setTimeout(() => runs.delete(runId), FORGET_GRACE_MS);
+      timer.unref();
+    },
+
+    stream(runId) {
+      const log = get(runId);
+      const encoder = new TextEncoder();
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
+      let subscriber: Subscriber | null = null;
+
+      const cleanup = (): void => {
+        if (heartbeat !== undefined) {
+          clearInterval(heartbeat);
+        }
+        if (subscriber !== null) {
+          log.subscribers.delete(subscriber);
+          subscriber = null;
+        }
+      };
+
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          const write = (text: string): void => {
+            try {
+              controller.enqueue(encoder.encode(text));
+            } catch {
+              // The watcher is gone.
+            }
+          };
+
+          write(": connected\n\n");
+          for (const event of log.events) {
+            write(`data: ${JSON.stringify(event)}\n\n`);
+          }
+          if (log.ended !== null) {
+            controller.close();
+            return;
+          }
+
+          subscriber = (frame) => {
+            if (frame.event !== undefined) {
+              write(`data: ${JSON.stringify(frame.event)}\n\n`);
+            }
+            if (frame.end !== undefined) {
+              cleanup();
+              try {
+                controller.close();
+              } catch {
+                // Already closed.
+              }
+            }
+          };
+          log.subscribers.add(subscriber);
+          heartbeat = setInterval(() => write(": ping\n\n"), HEARTBEAT_MS);
+        },
+        cancel: cleanup,
+      });
+    },
+  };
 }

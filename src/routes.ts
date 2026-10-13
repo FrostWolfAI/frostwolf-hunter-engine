@@ -22,7 +22,6 @@ import {
   setFindingStatus,
   startRun,
   stopHunt,
-  updateRunStatus,
   type Env,
 } from "./data/db.js";
 import type { FindingStatus, HuntMode } from "./data/types.js";
@@ -37,7 +36,8 @@ const TERMINAL: readonly string[] = ["completed", "failed", "stopped"];
 export interface RouteDeps {
   readonly secret: string;
   readonly env: Env;
-  readonly enqueue: (runId: string) => Promise<void>;
+  /** Run a just-created run now, in this process. Fire-and-forget: no queue. */
+  readonly execute: (runId: string) => void;
   /** A server-sent-event stream of a run's live log. */
   readonly liveStream: (runId: string) => ReadableStream<Uint8Array>;
 }
@@ -148,14 +148,9 @@ async function route(
         if (run === null) {
           return errorResponse(404, "not_found", "No such hunt.");
         }
-        try {
-          await deps.enqueue(run.id);
-        } catch {
-          // Redis is down: the run exists but will never be picked up, so say so
-          // rather than leave it `queued` forever.
-          await updateRunStatus(env, run.id, { status: "failed", stage: "queue" });
-          return errorResponse(503, "unavailable", "The queue is unavailable.");
-        }
+        // Run it now, in this process. Progress and any failure show up in the
+        // run's own live log and status, which the caller follows via `stream`.
+        deps.execute(run.id);
         return jsonResponse({ run }, 202);
       }
       if (action === "stop" && method === "POST") {
@@ -225,7 +220,7 @@ async function route(
  * Stream a run's log.
  *
  * The run is looked up under the tenant first, so a caller can only ever watch
- * their own. A run that is still going streams live from Redis; one that has
+ * their own. A run that is still going streams live from memory; one that has
  * finished is replayed from the durable copy in D1.
  */
 async function streamRun(deps: RouteDeps, tenantId: string, runId: string): Promise<Response> {

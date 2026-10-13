@@ -13,18 +13,15 @@ const SECRET = "test-hunter-secret";
 /** Hands each run its own fixture checkout, as cloneRepo would in production. */
 const fixturePrepare = async (): Promise<PreparedRepo> => createFixtureRepo();
 
-/** A Hunter wired to an in-memory database and a recording queue. */
-function harness(options: { failEnqueue?: boolean } = {}) {
+/** A Hunter wired to an in-memory database and a recording executor. */
+function harness() {
   const env = memoryEnv();
-  const enqueued: string[] = [];
+  const executed: string[] = [];
   const handler = createHandler({
     secret: SECRET,
     env,
-    enqueue: async (runId) => {
-      if (options.failEnqueue === true) {
-        throw new Error("redis down");
-      }
-      enqueued.push(runId);
+    execute: (runId) => {
+      executed.push(runId);
     },
     liveStream: () => new Response("data: {\"message\":\"live\"}\n\n").body!,
   });
@@ -50,7 +47,7 @@ function harness(options: { failEnqueue?: boolean } = {}) {
     );
 
   const json = async <T>(response: Response): Promise<T> => (await response.json()) as T;
-  return { env, enqueued, call, json };
+  return { env, executed, call, json };
 }
 
 type H = ReturnType<typeof harness>;
@@ -114,7 +111,7 @@ describe("the platform, end to end", () => {
     expect(started.status).toBe(202);
     const { run } = await h.json<{ run: { id: string; status: string } }>(started);
     expect(run.status).toBe("queued");
-    expect(h.enqueued).toEqual([run.id]);
+    expect(h.executed).toEqual([run.id]);
 
     await processRun(run.id, {
       store: createStore(h.env),
@@ -188,16 +185,6 @@ describe("the platform, end to end", () => {
     expect(rest).toHaveLength(0);
   });
 
-  it("marks the run failed when the queue is down", async () => {
-    const h = harness({ failEnqueue: true });
-    const { huntId } = await makeHunt(h);
-    const response = await h.call("POST", `/v1/hunter/hunts/${huntId}/start`);
-    expect(response.status).toBe(503);
-    const { runs } = await h.json<{ runs: Array<{ status: string }> }>(
-      await h.call("GET", `/v1/hunter/hunts/${huntId}/runs`),
-    );
-    expect(runs[0]!.status).toBe("failed");
-  });
 });
 
 describe("tenant isolation", () => {

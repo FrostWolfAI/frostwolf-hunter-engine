@@ -1,30 +1,33 @@
 # FrostWolf Hunter — local bundle.
 #
-# Runs the Hunter agent on THIS machine and writes everything to PRODUCTION.
-# There is NO local database, NO local Redis, and NO local control plane: storage
-# is prod D1, reached through the gateway worker, and every record is stamped with
-# FW_ORG_ID so prod knows which org it belongs to.
+# One always-on HTTP service, nothing local. No Redis, no queue, no local database:
+# a hunt is started by a direct API call and runs in the engine process, and all
+# state is written to PROD D1 through the gateway worker. The org that owns a hunt
+# is the `x-fw-tenant` on the API call.
 #
-# One hunt per invocation (the agent clones the repo, runs the pipeline, writes the
-# connection/hunt/run/events/findings to prod, then exits):
+#   docker compose up -d --build         # start the engine on :6888 (auto-restarts)
 #
-#   FW_ORG_ID=<org> HUNTER_SECRET=<prod shared secret> MATTERAI_API_KEY=<key> \
-#     REPO_URL=https://github.com/<org>/<repo> docker compose run --rm hunter
+# Then drive it over its API (the shared secret as bearer, your org as the tenant):
+#   S=$HUNTER_SECRET; T=<your-org-id>; H="-H authorization:Bearer\ $S -H x-fw-tenant:$T"
+#   C=$(curl -s $H -H content-type:application/json localhost:6888/v1/hunter/connections \
+#         -d '{"provider":"github","repos":["<org>/<repo>"]}' | jq -r .connection.id)
+#   HUNT=$(curl -s $H -H content-type:application/json localhost:6888/v1/hunter/hunts \
+#         -d "{\"connection_id\":\"$C\",\"scope\":{\"repo\":\"https://github.com/<org>/<repo>\"}}" | jq -r .hunt.id)
+#   RUN=$(curl -s $H -X POST localhost:6888/v1/hunter/hunts/$HUNT/start | jq -r .run.id)
+#   curl -s $H localhost:6888/v1/hunter/runs/$RUN/stream   # live log (SSE)
 #
 services:
   hunter:
     build:
       context: .
       dockerfile: Dockerfile
-    # A one-shot agent: it runs a single hunt and exits, so it must NOT auto-restart
-    # (that would re-run the hunt forever). The long-running engine that auto-restarts
-    # is the GCP deployment, not this local bundle.
-    restart: "no"
+    # Always-on engine: it keeps serving the API and auto-restarts on crash/reboot.
+    restart: unless-stopped
     environment:
+      PORT: "6888"
       # --- prod connection (nothing local) -----------------------------------
       WORKER_URL: ${WORKER_URL:-https://api.frostwolf.app} # prod gateway -> prod D1
       HUNTER_SECRET: ${HUNTER_SECRET:?set the prod shared secret}
-      FW_ORG_ID: ${FW_ORG_ID:?set your org id; every record is stored under it}
       # --- models ------------------------------------------------------------
       MATTERAI_BASE_URL: ${MATTERAI_BASE_URL:-https://api2.matterai.so/v1}
       MATTERAI_API_KEY: ${MATTERAI_API_KEY:?set the model API key}
@@ -35,4 +38,5 @@ services:
       AGENT_RUNTIME: ${AGENT_RUNTIME:-orbcode}
       # orbcode is bundled in the image; ORBCODE_BIN defaults to its install path.
       JUDGE_PROVIDER: ${JUDGE_PROVIDER:-skip}
-    command: ["node", "scripts/run-and-push.mjs", "${REPO_URL:?set REPO_URL to the public repo to hunt}"]
+    ports:
+      - "6888:6888" # the Hunter API, reachable from the host

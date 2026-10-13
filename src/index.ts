@@ -1,20 +1,18 @@
 /**
  * Hunter entry point.
  *
- * One service: an HTTP API for the gateway worker, a run queue on a native Redis
- * stream, and a worker pool that runs each hunt in its own sandboxed child
- * process. It connects to Redis directly and to D1 through the gateway worker,
- * with one shared secret, and to matterai.so (or, once it ships, Clef) for model
- * calls, with the API key handed to each run's child over IPC rather than through
- * its environment.
+ * One always-on HTTP service. A hunt is started by a direct API call
+ * (`POST /v1/hunter/hunts/:id/start`) and runs in this process, each in its own
+ * sandboxed child; there is no queue and no Redis. It reaches D1 through the
+ * gateway worker with one shared secret, calls matterai.so (or, once it ships,
+ * Clef) for model calls — the API key handed to each run's child over IPC, never
+ * its environment — and streams the live log from memory.
  */
 
-import { Redis } from "ioredis";
 import { loadConfig } from "./config.js";
 import { D1Client } from "./d1.js";
 import { serve } from "./http.js";
-import { createLive, liveStream } from "./live.js";
-import { createQueue, startWorker } from "./queue.js";
+import { createMemoryLive } from "./live.js";
 import { cloneRepo } from "./repo.js";
 import { processRun } from "./runner.js";
 import { createHandler } from "./routes.js";
@@ -53,11 +51,9 @@ async function main(): Promise<void> {
     );
   }
 
-  const redis = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
   const env = { DB: new D1Client(config) };
   const store = createStore(env);
-  const live = createLive(redis);
-  const queue = createQueue(config, redis);
+  const live = createMemoryLive();
   const spawn = forkSpawner();
   const credentials = toCredentials(config);
 
@@ -87,8 +83,11 @@ async function main(): Promise<void> {
       repoDir,
     );
 
-  const worker = startWorker(config, redis, (runId) =>
-    processRun(runId, {
+  // A hunt is started by a direct API call and runs in this process — no queue.
+  // Fire-and-forget: the HTTP response returns 202 immediately and the client
+  // follows the live log; a crash surfaces in the run's own events and status.
+  const execute = (runId: string): void => {
+    void processRun(runId, {
       store,
       live,
       spawn,
@@ -98,28 +97,25 @@ async function main(): Promise<void> {
       capabilities,
       makeCommandRunner,
       webSearch,
-    }),
-  );
+    }).catch((error: unknown) => console.error(`run ${runId} failed:`, error));
+  };
 
   const server = serve(
     createHandler({
       secret: config.secret,
       env,
-      enqueue: (runId) => queue.add(runId),
-      liveStream: (runId) => liveStream(redis, runId),
+      execute,
+      liveStream: (runId) => live.stream(runId),
     }),
   );
   server.listen(config.port, () => console.log(`hunter listening on :${config.port}`));
 
-  const shutdown = async (): Promise<void> => {
+  const shutdown = (): void => {
     server.close();
-    await worker.close();
-    await queue.close();
-    await redis.quit();
     process.exit(0);
   };
-  process.on("SIGTERM", () => void shutdown());
-  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
 }
 
 main().catch((error: unknown) => {

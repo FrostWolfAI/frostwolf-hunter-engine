@@ -5,7 +5,7 @@ worker (`frostwolf-worker`) is Guard plus a thin gateway, and Hunter sits behind
 it. See `../HUNTER-PLAN.md` and `../HUNTER-PRD.md`.
 
 ```
-console / CLI ──▶ worker (auth, gateway) ──▶ Hunter ──▶ Redis   queue + live log
+console / CLI ──▶ worker (auth, gateway) ──▶ Hunter (HTTP API)
                        ▲                        │ ├──▶ matterai.so  model calls
                        └──── /internal/d1 ◀─────┘        D1 via the worker
 ```
@@ -15,15 +15,16 @@ console / CLI ──▶ worker (auth, gateway) ──▶ Hunter ──▶ Redis 
   never sees a cookie or a customer key.
 - **One shared secret**, `HUNTER_SECRET`, used both ways: the worker presents it
   to Hunter, and Hunter presents it to reach D1 through the worker's generic
-  `/internal/d1`. Hunter connects to Redis directly with `REDIS_URL`.
-- **Redis** holds the run queue and the live log. The queue is a plain Redis
-  stream with a consumer group (`src/queue.ts`) — no queueing library — and the
-  live log is a list plus pub/sub, so a late watcher replays and a live one
-  streams. **D1** holds everything durable: connections, hunts, runs,
+  `/internal/d1`.
+- **A hunt is started by a direct API call** (`POST /v1/hunter/hunts/:id/start`)
+  and runs in the engine process — no queue, no Redis. The live log is kept in
+  memory and streamed over SSE (`src/live.ts`), so a watcher that connects while a
+  run is in flight replays the backlog and then follows live; a finished run is
+  served from D1. **D1** holds everything durable: connections, hunts, runs,
   hypotheses, JEV verdicts, findings, and the log's durable copy.
 - **Each hunt runs in its own child process**: empty environment, Node's
   permission model (reads only its own code, no writes, no spawning), and a heap
-  cap. The parent owns every connection — Redis, D1, and matterai.so — except the
+  cap. The parent owns every connection — D1 and matterai.so — except the
   one child gets its own run-scoped copy of the model credentials over IPC, never
   through its environment, because it has to make its own model and target calls
   (see `src/sandbox.ts`, `src/types.ts`'s `RunCredentials`). A hunt that is
@@ -142,17 +143,16 @@ prod matterai endpoint — override them only to point elsewhere.
 `node scripts/run-local.mjs <repo>` runs the same pipeline but prints the findings
 instead of writing to prod — a quick offline smoke test.
 
-> The long-running engine (`node dist/index.js`: HTTP API + Redis queue + live log)
-> is the **GCP** deployment, not this local bundle. It needs a Redis endpoint; the
-> prod D1 tables are already applied.
+> The same `node dist/index.js` HTTP service runs on **GCP** as the shared
+> deployment; the local bundle is the identical image, just pointed at prod D1.
+> Prod D1 tables are already applied.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `src/index.ts` | Entry: HTTP API, Redis stream queue, worker pool. |
-| `src/routes.ts` | The API the gateway forwards to. |
-| `src/queue.ts` | The run queue, as a native Redis stream + consumer group. |
+| `src/index.ts` | Entry: the always-on HTTP service; a start call runs the hunt in-process. |
+| `src/routes.ts` | The API the gateway forwards to; `start` runs a hunt directly. |
 | `src/runner.ts` | One run: spawn the child, relay events/verdicts/findings, write status. |
 | `src/sandbox.ts` | The sandboxed child process, and the credentials handoff. |
 | `src/egress-proxy.ts` | OS-level egress boundary: scoped proxy enforcing the allowlist. |
@@ -161,7 +161,7 @@ instead of writing to prod — a quick offline smoke test.
 | `src/judge.ts` | The JEV judge call: structured verdict, fail-closed on anything that doesn't parse. |
 | `src/scope.ts` | The egress allowlist check. |
 | `src/models/` | `ModelClient`, the matterai.so client, and the Clef stub. |
-| `src/live.ts` | The live log in Redis. |
+| `src/live.ts` | The in-memory live log + its SSE stream. |
 | `src/d1.ts`, `src/data/` | D1 via the worker, and the queries. |
 
 ## Verify

@@ -1,12 +1,12 @@
 /**
  * Configuration, read once from the environment.
  *
- * Hunter runs on GCP and connects to Redis directly. It reaches D1 through the
- * gateway worker, and the worker reaches Hunter, with one shared secret between
- * them. It calls out to one more place: an inference gateway (matterai.so) for
- * the attacker, verifier, and judge model calls.
+ * Hunter is one HTTP service. It reaches D1 through the gateway worker, and the
+ * worker reaches Hunter, with one shared secret between them. It calls out to one
+ * more place: an inference gateway (matterai.so) for the attacker, verifier, and
+ * judge model calls. No queue, no Redis — a hunt is started by a direct API call.
  *
- * Required: `REDIS_URL`, `HUNTER_SECRET`, `MATTERAI_API_KEY`, `ATTACKER_MODEL`,
+ * Required: `HUNTER_SECRET`, `MATTERAI_API_KEY`, `ATTACKER_MODEL`,
  * `VERIFIER_MODEL`, `JUDGE_MODEL`. Missing AI configuration does not crash the
  * service — it fails each run closed at the start of its pipeline with a clear
  * reason, so a misconfigured deploy is visible per-run rather than down entirely.
@@ -17,15 +17,10 @@ export type AiProvider = "matterai" | "clef";
 
 export interface Config {
   readonly port: number;
-  readonly redisUrl: string;
   /** The gateway worker, which lends D1 and is the only caller of this service. */
   readonly workerUrl: string;
   /** The one shared secret: the worker presents it to us and we present it back. */
   readonly secret: string;
-  /** Redis stream the run queue lives on. */
-  readonly queueName: string;
-  /** How many runs execute at once. */
-  readonly concurrency: number;
   /** Wall-clock budget for one run's child process, in milliseconds. */
   readonly runTimeoutMs: number;
 
@@ -81,7 +76,6 @@ export interface Config {
 }
 
 const DEFAULT_PORT = 8080;
-const DEFAULT_CONCURRENCY = 2;
 const DEFAULT_RUN_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_VERIFY_N = 3;
 const DEFAULT_AI_BASE_URL = "https://api2.matterai.so/v1";
@@ -102,11 +96,8 @@ function floatFromEnv(name: string, fallback: number): number {
 export function loadConfig(): Config {
   return {
     port: intFromEnv("PORT", DEFAULT_PORT),
-    redisUrl: process.env.REDIS_URL ?? "redis://127.0.0.1:6379",
     workerUrl: (process.env.WORKER_URL ?? "https://api.frostwolf.app").replace(/\/$/, ""),
     secret: process.env.HUNTER_SECRET ?? "",
-    queueName: process.env.QUEUE_NAME ?? "hunter-runs",
-    concurrency: intFromEnv("CONCURRENCY", DEFAULT_CONCURRENCY),
     runTimeoutMs: intFromEnv("RUN_TIMEOUT_MS", DEFAULT_RUN_TIMEOUT_MS),
 
     aiProvider: process.env.MODEL_PROVIDER === "clef" ? "clef" : "matterai",
