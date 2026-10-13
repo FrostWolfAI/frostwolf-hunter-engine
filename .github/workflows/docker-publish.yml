@@ -1,0 +1,69 @@
+name: Docker publish
+
+# Build the Hunter engine image and push it to Docker Hub on every push to main.
+# Secrets required (Settings -> Secrets and variables -> Actions):
+#   DOCKERHUB_USERNAME  your Docker Hub username (the namespace the image is pushed under)
+#   DOCKERHUB_TOKEN     a Docker Hub access token with Read/Write (preferred over the password)
+# The image is published as <DOCKERHUB_USERNAME>/frostwolf-hunter-engine with tags
+# `latest`, the package.json version, and `sha-<short>`.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read package version
+        id: pkg
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Docker metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # Namespace comes from the username secret. If you'd rather see the full
+          # image name in the logs (secrets are masked), make DOCKERHUB_USERNAME a
+          # repository *variable* and use ${{ vars.DOCKERHUB_USERNAME }} here instead.
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/frostwolf-hunter-engine
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ steps.pkg.outputs.version }}
+            type=sha,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # The bundle runs on dev machines (incl. Apple Silicon) as well as x86
+          # servers, so build both architectures.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
