@@ -29,8 +29,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
   && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
+# Bundle the orbcode harness: it is the default generator runtime, so the image
+# must carry it. ORBCODE_BIN points at its launcher. (npm latest is 7.0.1; publish
+# orbcode 7.0.2 to npm to get multi-turn --resume into the image.)
+RUN npm i -g @matterailab/orbcode@^7.0.1
+ENV ORBCODE_BIN=/usr/local/lib/node_modules/@matterailab/orbcode/bin/orbcode.js
 COPY --from=build /app/dist ./dist
 COPY migrations ./migrations
+# The local-agent entrypoint (scripts/run-and-push.mjs) runs one hunt and pushes
+# the results to prod D1 under FW_ORG_ID. docker-compose.yml overrides CMD to it.
+COPY scripts ./scripts
 EXPOSE 8080
 USER node
 CMD ["node", "dist/index.js"]

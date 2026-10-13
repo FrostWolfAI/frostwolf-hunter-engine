@@ -1,75 +1,38 @@
-# Full local FrostWolf Hunter stack for end-to-end testing — no Cloudflare, no GCP.
+# FrostWolf Hunter — local bundle.
 #
-#   docker compose up --build
-#   node devstack/seed.mjs https://github.com/<org>/<repo>   # start a hunt, watch it
+# Runs the Hunter agent on THIS machine and writes everything to PRODUCTION.
+# There is NO local database, NO local Redis, and NO local control plane: storage
+# is prod D1, reached through the gateway worker, and every record is stamped with
+# FW_ORG_ID so prod knows which org it belongs to.
 #
-# Three services: Redis (queue + live log), a dev control-plane standing in for the
-# Cloudflare worker (D1-over-SQLite + the /v1/hunter gateway), and the Hunter engine.
-# The only thing not local is the model endpoint — point MATTERAI_BASE_URL at your
-# own gateway (defaults to the shared qwen endpoint) or a local Ollama/llama.cpp.
+# One hunt per invocation (the agent clones the repo, runs the pipeline, writes the
+# connection/hunt/run/events/findings to prod, then exits):
+#
+#   FW_ORG_ID=<org> HUNTER_SECRET=<prod shared secret> MATTERAI_API_KEY=<key> \
+#     REPO_URL=https://github.com/<org>/<repo> docker compose run --rm hunter
+#
 services:
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  control-plane:
-    build:
-      context: .
-      dockerfile: devstack/Dockerfile
-    restart: unless-stopped
-    environment:
-      PORT: "8787"
-      HUNTER_SECRET: ${HUNTER_SECRET:-dev-secret}
-      HUNTER_URL: http://hunter:6888
-      DB_PATH: /data/hunter.db
-    volumes:
-      - d1-data:/data
-    ports:
-      - "8787:8787" # the gateway + /internal/d1, reachable from the host
-    depends_on:
-      - hunter
-
   hunter:
     build:
       context: .
       dockerfile: Dockerfile
-    restart: unless-stopped
+    # A one-shot agent: it runs a single hunt and exits, so it must NOT auto-restart
+    # (that would re-run the hunt forever). The long-running engine that auto-restarts
+    # is the GCP deployment, not this local bundle.
+    restart: "no"
     environment:
-      PORT: "6888"
-      REDIS_URL: redis://redis:6379
-      HUNTER_SECRET: ${HUNTER_SECRET:-dev-secret}
-      WORKER_URL: http://control-plane:8787
-      # Model endpoint (OpenAI-compatible). Defaults to the shared qwen gateway.
-      MATTERAI_BASE_URL: ${MATTERAI_BASE_URL:-https://qwen38cyber.frostwolf.app/v1}
-      MATTERAI_API_KEY: ${MATTERAI_API_KEY:-none}
-      ATTACKER_MODEL: ${ATTACKER_MODEL:-Qwen3.8-27B-abliterated-cyber-preview-MTP-Q4_K_M.gguf}
-      VERIFIER_MODEL: ${VERIFIER_MODEL:-Qwen3.8-27B-abliterated-cyber-preview-MTP-Q4_K_M.gguf}
-      JUDGE_MODEL: ${JUDGE_MODEL:-Qwen3.8-27B-abliterated-cyber-preview-MTP-Q4_K_M.gguf}
+      # --- prod connection (nothing local) -----------------------------------
+      WORKER_URL: ${WORKER_URL:-https://api.frostwolf.app} # prod gateway -> prod D1
+      HUNTER_SECRET: ${HUNTER_SECRET:?set the prod shared secret}
+      FW_ORG_ID: ${FW_ORG_ID:?set your org id; every record is stored under it}
+      # --- models ------------------------------------------------------------
+      MATTERAI_BASE_URL: ${MATTERAI_BASE_URL:-https://api2.matterai.so/v1}
+      MATTERAI_API_KEY: ${MATTERAI_API_KEY:?set the model API key}
+      ATTACKER_MODEL: ${ATTACKER_MODEL:-frost-abliterated-cyber-max-1}
+      VERIFIER_MODEL: ${VERIFIER_MODEL:-frost-abliterated-cyber-max-1}
       VERIFY_N: ${VERIFY_N:-1}
-      CONCURRENCY: ${CONCURRENCY:-1}
-      # Generator runtime: "orbcode" (DEFAULT) | "claude" | "codex" | "internal".
-      # orbcode is the real runtime and must be bundled in the image with ORBCODE_BIN
-      # pointing at its bin/orbcode.js (see Dockerfile). "internal" is for tests only.
+      # --- generator runtime + judge -----------------------------------------
       AGENT_RUNTIME: ${AGENT_RUNTIME:-orbcode}
-      ORBCODE_BIN: ${ORBCODE_BIN:-}
-      # JEV judge backend: "skip" (default; no judge call), "chat" (LLM), or
-      # "gliner" (GLiNER2.5-Decide). Skip is the default while the judge is reworked.
+      # orbcode is bundled in the image; ORBCODE_BIN defaults to its install path.
       JUDGE_PROVIDER: ${JUDGE_PROVIDER:-skip}
-      JUDGE_BASE_URL: ${JUDGE_BASE_URL:-}
-    ports:
-      - "6888:6888" # the Hunter engine, reachable from the host
-    depends_on:
-      redis:
-        condition: service_healthy
-
-volumes:
-  redis-data: {}
-  d1-data: {}
+    command: ["node", "scripts/run-and-push.mjs", "${REPO_URL:?set REPO_URL to the public repo to hunt}"]

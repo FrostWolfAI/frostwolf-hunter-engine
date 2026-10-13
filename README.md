@@ -88,66 +88,59 @@ catches all egress, not just `fetch()` calls.
 
 ## Run it locally
 
-The easiest way to run Hunter locally is with Docker Compose. This spins up the
-full stack: Redis, a dev control-plane (D1-over-SQLite + gateway), and the Hunter
-engine.
+The local bundle runs the Hunter **agent** on your machine and writes everything to
+**production** — there is no local database, no local Redis, no local control plane.
+Storage is prod D1 (reached through the gateway worker), and every record is stamped
+with `FW_ORG_ID` so prod knows which org it belongs to.
 
 ```bash
-# Clone the repo
 git clone https://github.com/FrostWolfAI/frostwolf-hunter-engine.git
 cd frostwolf-hunter-engine
 
-# Start the full stack
-docker compose up --build
-
-# In another shell, start a hunt against any public repo
-node devstack/seed.mjs https://github.com/<org>/<repo>
+# One hunt: clone the repo, run the pipeline, push the results to prod under your org.
+FW_ORG_ID=<your-org-id> \
+HUNTER_SECRET=<prod shared secret> \
+MATTERAI_API_KEY=<model key> \
+REPO_URL=https://github.com/<org>/<repo> \
+  docker compose run --rm hunter
 ```
 
-`seed.mjs` creates a connection + hunt (scope = that repo), starts a run through
-the gateway, streams the live log until the run finishes, then prints the findings.
+The agent clones `REPO_URL`, runs recon → synthesis → validate → exploit → verify
+with the orbcode generator (bundled in the image), writes the connection, hunt, run,
+live events, and findings to prod D1 under `FW_ORG_ID`, then exits. It is a one-shot
+agent, not a standing service, so it does not auto-restart. Results appear in the
+console/dashboard for that org.
 
 ### Model configuration
 
-The only thing not local is the LLM. By default the stack points at the shared
-qwen endpoint. Override it for your own gateway or a local one:
+Defaults: `WORKER_URL=https://api.frostwolf.app`, attacker/verifier
+`frost-abliterated-cyber-max-1`, `JUDGE_PROVIDER=skip`, `AGENT_RUNTIME=orbcode`.
+Override any through the environment:
 
 ```bash
-# .env next to docker-compose.yml
-MATTERAI_BASE_URL=http://host.docker.internal:11434/v1   # e.g. a local Ollama
-ATTACKER_MODEL=qwen2.5-coder
-VERIFIER_MODEL=qwen2.5-coder
-JUDGE_MODEL=qwen2.5-coder
+MATTERAI_BASE_URL=https://api2.matterai.so/v1
+ATTACKER_MODEL=frost-abliterated-cyber-max-1
+VERIFIER_MODEL=frost-abliterated-cyber-max-1
 VERIFY_N=1
-AGENT_RUNTIME=internal     # or "orbcode"
-HUNTER_SECRET=dev-secret
 ```
-
-To make it fully offline, run a local OpenAI-compatible server (Ollama, llama.cpp,
-vLLM) and point `MATTERAI_BASE_URL` at it.
 
 ### Run without Docker
 
-```bash
-cp .env.example .env     # REDIS_URL, HUNTER_SECRET, MATTERAI_API_KEY, model names
-npm install
-npm run dev              # builds, then starts
-```
-
-Create the tables once (both migrations, in order):
+Run the agent straight from the checkout — same prod-connected behavior:
 
 ```bash
-cd ../frostwolf-worker
-npx wrangler d1 execute frostwolf --remote --file ../frostwolf-hunter-engine/migrations/0001_hunter.sql
-npx wrangler d1 execute frostwolf --remote --file ../frostwolf-hunter-engine/migrations/0002_hunter_verdicts.sql
+npm install && npm run build
+FW_ORG_ID=<org> WORKER_URL=https://api.frostwolf.app HUNTER_SECRET=<secret> \
+MATTERAI_API_KEY=<key> ORBCODE_BIN=/path/to/orbcode/bin/orbcode.js \
+  node scripts/run-and-push.mjs https://github.com/<org>/<repo>
 ```
 
-Then on the worker: `wrangler secret put HUNTER_SECRET` (same value) and set
-`HUNTER_URL` to wherever this service is reachable.
+`node scripts/run-local.mjs <repo>` runs the same pipeline but prints the findings
+instead of writing to prod — a quick offline smoke test.
 
-```bash
-docker build -t frostwolf-hunter . && docker run --env-file .env -p 8080:8080 frostwolf-hunter
-```
+> The long-running engine (`node dist/index.js`: HTTP API + Redis queue + live log)
+> is the **GCP** deployment, not this local bundle. It needs a Redis endpoint; the
+> prod D1 tables are already applied.
 
 ## Layout
 
