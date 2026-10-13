@@ -13,7 +13,7 @@
  */
 
 import { runAgent } from "./agent.js";
-import { createChatJudge, createGlinerJudge } from "./judge.js";
+import { createChatJudge, createGlinerJudge, createPassthroughJudge } from "./judge.js";
 import { createModelClient, type ModelConfig } from "./models/index.js";
 import type { ModelClient } from "./models/types.js";
 import { createOrbcodeExplorer, type ExecFn, type ExploreTask } from "./orbcode.js";
@@ -45,22 +45,38 @@ export async function executeRun(
   const makeClient = deps.makeClient ?? createModelClient;
   const broker = deps.broker ?? disabledBroker;
 
+  const failClosed = (message: string, reason: string): void => {
+    post({
+      type: "event",
+      event: { level: "error", stage: "intake", message, ts: new Date().toISOString() },
+    });
+    post({ type: "done", ok: false, reason });
+  };
+
   if (
     credentials.aiApiKey.length === 0 ||
     credentials.attackerModel.length === 0 ||
-    credentials.verifierModel.length === 0 ||
-    credentials.judgeModel.length === 0
+    credentials.verifierModel.length === 0
   ) {
-    post({
-      type: "event",
-      event: {
-        level: "error",
-        stage: "intake",
-        message: "AI inference is not configured (missing API key or model name).",
-        ts: new Date().toISOString(),
-      },
-    });
-    post({ type: "done", ok: false, reason: "ai_not_configured" });
+    failClosed("AI inference is not configured (missing API key or model name).", "ai_not_configured");
+    return;
+  }
+
+  // Generator runtime. orbcode is the default and the only wired real runtime; it
+  // NEVER silently falls back to the built-in loop. `claude`/`codex` are reserved
+  // and fail clearly until wired. `internal` is the built-in loop, for tests only.
+  if (credentials.agentRuntime === "claude" || credentials.agentRuntime === "codex") {
+    failClosed(
+      `generator runtime "${credentials.agentRuntime}" is selected but not wired yet; use AGENT_RUNTIME=orbcode`,
+      "generator_runtime_not_wired",
+    );
+    return;
+  }
+  if (credentials.agentRuntime === "orbcode" && (repoDir === null || credentials.orbcodeBin.length === 0)) {
+    failClosed(
+      "orbcode runtime requires a cloned repository and ORBCODE_BIN; refusing to fall back to the built-in loop",
+      "orbcode_unavailable",
+    );
     return;
   }
 
@@ -112,9 +128,12 @@ export async function executeRun(
 
   const client = makeClient(credentials);
 
-  // The JEV judge backend: a decision model when configured, otherwise the LLM.
-  // With no dedicated decision service, the decision model is reached through the
-  // same gateway as the other roles, under the same key.
+  // The JEV judge backend. `skip` (the default) calls no model — it clears every
+  // gate so the recon → synthesis → validate → verify flow runs end to end while
+  // the real judge is reworked; the generators and verify's independent
+  // re-derivation still do their own work. `gliner` uses the decision model,
+  // `chat` the LLM. A decision model with no dedicated service is reached through
+  // the same gateway as the other roles, under the same key.
   const viaGateway = credentials.judgeBaseUrl.length === 0;
   const judge =
     credentials.judgeProvider === "gliner"
@@ -122,7 +141,9 @@ export async function executeRun(
           viaGateway ? credentials.aiBaseUrl : credentials.judgeBaseUrl,
           viaGateway ? { apiKey: credentials.aiApiKey, model: credentials.judgeModel } : {},
         )
-      : createChatJudge(client, credentials.judgeModel);
+      : credentials.judgeProvider === "chat"
+        ? createChatJudge(client, credentials.judgeModel)
+        : createPassthroughJudge();
 
   const ctx: RunContext = {
     job,

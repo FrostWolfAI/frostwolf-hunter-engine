@@ -41,10 +41,21 @@ The full eight-stage pipeline is built and tested:
 2. **recon** — discover attack surface (stub without repo access)
 3. **synthesis** — attacker brain proposes hypotheses
 4. **validate** — JEV judges score plausibility, then adjudicate against the real code
-5. **exploit** — attacker brain constructs a concrete proof of impact, JEV adjudicates it
+5. **exploit** — attacker brain constructs a best-effort proof of impact (never gates)
 6. **verify** — independent N/N reproduction
 7. **root_cause** — trace exploit to root cause (stub without repo access)
 8. **report** — generate findings with PoC and remediation
+
+> **Judge default is `skip`.** `JUDGE_PROVIDER=skip` (the default while the judge
+> is being reworked) calls no model and clears every gate, so recon → synthesis →
+> validate → verify runs end to end. The generators still explore and `verify`
+> still re-derives on an independent model that must agree, so this is not "promote
+> everything" — but it is not a truth gate either. Set `JUDGE_PROVIDER=chat` (or
+> `gliner`) to turn the JEV judges back on.
+>
+> **The sandbox is always a container.** `bash` is never disabled by config; it
+> runs only inside an isolated container and the host must provide a container
+> runtime. There is no host-execution or no-op fallback.
 
 The **attacker brain** proposes hypotheses against the declared scope, the
 **Plausibility Judge** scores them, and **validate** rules whether the flaw is
@@ -52,13 +63,14 @@ real against the cited source. **exploit** then asks a harder question: given
 that the flaw is real, construct the concrete attacker input that would trigger
 it and trace it through the actual code to its impact — grounded reasoning
 against the real cloned repository (via the same agent substrate recon and
-synthesis use), not a live request against a booted target. A different judge
-rules on that specific construction, not the underlying claim. An independent
-reproduction — interpreted by the **verifier brain**, a different model — has to
-agree N/N (`VERIFY_N`, default 3) via the **Verification Judge** before anything
-is promoted. A run that confirms nothing promotes nothing. Every JEV gate's
-verdict is persisted (`hunter_verdicts`), so a promoted finding carries a full
-decision trail, including the constructed proof.
+synthesis use), not a live request against a booted target. The construction is
+attached to the finding when it succeeds; the exploit stage never drops a
+hypothesis, so every confirmed flaw reaches verification whether or not a proof
+was built. An independent reproduction — interpreted by the **verifier brain**, a
+different model — has to agree N/N (`VERIFY_N`, default 3) before anything is
+promoted. A run that confirms nothing promotes nothing. Each gate's verdict is
+persisted (`hunter_verdicts`), so a promoted finding carries a decision trail
+(pass-through verdicts while the judge is skipped), including the constructed proof.
 
 **What this is not, yet:** nothing here boots a target, opens a socket, or runs
 a command against the target. There is no live PoC, only a constructed one. A

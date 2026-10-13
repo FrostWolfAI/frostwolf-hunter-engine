@@ -70,16 +70,12 @@ async function main(): Promise<void> {
     maxResults: 5,
   });
   const capabilities = {
-    bash: config.sandboxRuntime !== "none",
+    bash: true,
     webSearch: config.fireworksApiKey.trim().length > 0,
   };
-  if (!capabilities.bash) {
-    console.warn("SANDBOX_RUNTIME is not set — the bash tool is disabled (no host execution).");
-  }
   const makeCommandRunner = (repoDir: string) =>
     createCommandRunner(
       {
-        runtime: config.sandboxRuntime,
         image: config.sandboxImage,
         ociRuntime: config.sandboxOciRuntime,
         network: "none",

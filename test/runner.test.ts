@@ -103,8 +103,8 @@ describe("processRun — white-box discovery", () => {
     expect(ended).toEqual(["completed"]);
 
     // The full decision trail is persisted: plausibility, success adjudication,
-    // the exploit stage's proof adjudication, then one verification per
-    // independent reproduction.
+    // then one verification per independent reproduction. The exploit stage no
+    // longer gates (it attaches a proof but never drops), so it records no verdict.
     const verdicts = await env.DB.prepare(
       "SELECT gate FROM hunter_verdicts WHERE run_id = ?1 ORDER BY created_at",
     )
@@ -113,7 +113,6 @@ describe("processRun — white-box discovery", () => {
     expect(verdicts.results.map((v) => v.gate)).toEqual([
       "plausibility_judge",
       "success_adjudicator",
-      "exploit_adjudicator",
       "verification_judge",
       "verification_judge",
     ]);
@@ -126,7 +125,7 @@ describe("processRun — white-box discovery", () => {
     expect(hypothesis?.status).toBe("confirmed");
   });
 
-  it("promotes nothing when the plausibility judge drops the hypothesis", async () => {
+  it("promotes nothing when the plausibility judge drops the hypothesis (chat judge)", async () => {
     const env = memoryEnv();
     const { run } = await seed(env);
     const result = await processRun(run.id, {
@@ -134,7 +133,9 @@ describe("processRun — white-box discovery", () => {
       ...baseToolDeps,
       live: fakeLive().live,
       spawn: scriptedSpawner({ plausibility: "fail" }),
-      credentials: FAKE_CREDENTIALS,
+      // The default judge is skipped; this exercises the chat judge for when it
+      // is turned back on.
+      credentials: { ...FAKE_CREDENTIALS, judgeProvider: "chat" },
       timeoutMs: TIMEOUT_MS,
       prepareRepo: fixturePrepare,
     });
@@ -147,7 +148,7 @@ describe("processRun — white-box discovery", () => {
     expect(h?.status).toBe("dropped");
   });
 
-  it("promotes nothing when the code does not bear out the flaw (adjudicator fail)", async () => {
+  it("promotes nothing when the code does not bear out the flaw (chat judge, adjudicator fail)", async () => {
     const env = memoryEnv();
     const { run } = await seed(env);
     const result = await processRun(run.id, {
@@ -155,7 +156,7 @@ describe("processRun — white-box discovery", () => {
       ...baseToolDeps,
       live: fakeLive().live,
       spawn: scriptedSpawner({ adjudicator: "fail" }),
-      credentials: FAKE_CREDENTIALS,
+      credentials: { ...FAKE_CREDENTIALS, judgeProvider: "chat" },
       timeoutMs: TIMEOUT_MS,
       prepareRepo: fixturePrepare,
     });
@@ -166,7 +167,10 @@ describe("processRun — white-box discovery", () => {
     expect(h?.status).toBe("falsified");
   });
 
-  it("drops a confirmed hypothesis the attacker brain cannot turn into a concrete proof", async () => {
+  it("still promotes a confirmed hypothesis when no concrete proof can be constructed", async () => {
+    // The exploit stage is best-effort and never gates: a confirmed hypothesis the
+    // attacker brain cannot turn into a proof is carried to verification anyway, so
+    // the recon → synthesis → validate → verify flow still completes and promotes.
     const env = memoryEnv();
     const { run } = await seed(env);
     const result = await processRun(run.id, {
@@ -178,32 +182,51 @@ describe("processRun — white-box discovery", () => {
       timeoutMs: TIMEOUT_MS,
       prepareRepo: fixturePrepare,
     });
-    expect(result.findings).toBe(0);
+    expect(result.findings).toBe(1);
+    const findings = await listFindings(env, TENANT);
+    const finding = await getFinding(env, TENANT, findings[0]!.id);
+    expect(finding?.evidence).not.toContain("Proof of impact");
     const h = await env.DB.prepare("SELECT status FROM hunter_hypotheses WHERE run_id = ?1")
       .bind(run.id)
       .first<{ status: string }>();
-    expect(h?.status).toBe("falsified");
+    expect(h?.status).toBe("confirmed");
   });
 
-  it("drops a confirmed hypothesis whose constructed proof the judge rejects", async () => {
+  it("skips the judge by default, promoting without any judge-model call", async () => {
     const env = memoryEnv();
     const { run } = await seed(env);
+    // A model that refuses the judge role: if the judge model is ever called, the
+    // run throws. With the default judgeProvider="skip", it is never called, yet
+    // the flow still runs end to end and promotes a finding.
+    const noJudgeSpawn: Spawner = inProcessSpawner(() => {
+      const base = scriptedModel();
+      return {
+        async complete(options) {
+          if (options.model === FAKE_CREDENTIALS.judgeModel) {
+            throw new Error("judge model must not be called when the judge is skipped");
+          }
+          return base.complete(options);
+        },
+      };
+    }, fakeTargetFetch);
+
     const result = await processRun(run.id, {
       store: createStore(env),
       ...baseToolDeps,
       live: fakeLive().live,
-      // The attacker brain constructs something, but the exploit judge is not
-      // convinced it actually traverses the cited code to the claimed impact.
-      spawn: scriptedSpawner({ exploitAdjudicator: "fail" }),
+      spawn: noJudgeSpawn,
       credentials: FAKE_CREDENTIALS,
       timeoutMs: TIMEOUT_MS,
       prepareRepo: fixturePrepare,
     });
-    expect(result.findings).toBe(0);
-    const h = await env.DB.prepare("SELECT status FROM hunter_hypotheses WHERE run_id = ?1")
+
+    expect(result.status).toBe("completed");
+    expect(result.findings).toBe(1);
+    // The gates still recorded pass-through verdicts, just without a model call.
+    const verdicts = await env.DB.prepare("SELECT gate FROM hunter_verdicts WHERE run_id = ?1")
       .bind(run.id)
-      .first<{ status: string }>();
-    expect(h?.status).toBe("falsified");
+      .all<{ gate: string }>();
+    expect(verdicts.results.length).toBeGreaterThan(0);
   });
 
   it("carries the constructed proof into the promoted finding's evidence", async () => {

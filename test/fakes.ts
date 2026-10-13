@@ -1,8 +1,18 @@
 import type { ModelClient } from "../src/models/types.js";
 import type { PreparedRepo } from "../src/repo.js";
-import { disabledRunner } from "../src/sandbox-exec.js";
+import type { CommandRunner } from "../src/sandbox-exec.js";
 import { disabledWebSearch } from "../src/web-search.js";
 import type { RunCredentials } from "../src/types.js";
+
+/** A no-op command runner for tests: there is no Docker daemon in the suite, so
+ * nothing actually executes. The product sandbox is always a container; this only
+ * stands in for the parent-side runner the brokered `bash` tool would drive. */
+const noopRunner: CommandRunner = {
+  async exec() {
+    return { stdout: "", stderr: "no sandbox in tests", code: null, timedOut: false };
+  },
+  async dispose() {},
+};
 
 /** Dummy but non-empty credentials, so the pipeline's AI-config check passes. */
 export const FAKE_CREDENTIALS: RunCredentials = {
@@ -17,14 +27,16 @@ export const FAKE_CREDENTIALS: RunCredentials = {
   maxRunTokens: 1_000_000,
   agentRuntime: "internal",
   orbcodeBin: "",
-  judgeProvider: "chat",
+  judgeProvider: "skip",
   judgeBaseUrl: "",
 };
 
-/** The tool-related `processRun` deps for a test, with bash + web search off. */
+/** The tool-related `processRun` deps for a test. Bash is wired (the product
+ * sandbox is always on) but has no real container here, so it runs nothing; web
+ * search is off. */
 export const baseToolDeps = {
-  capabilities: { bash: false, webSearch: false },
-  makeCommandRunner: () => disabledRunner,
+  capabilities: { bash: true, webSearch: false },
+  makeCommandRunner: () => noopRunner,
   webSearch: disabledWebSearch,
 };
 
@@ -51,8 +63,6 @@ export interface ScriptOutcomes {
   readonly verification?: Verdict;
   /** Whether the attacker brain constructs a usable proof in the exploit stage. */
   readonly provable?: boolean;
-  /** The exploit stage's judge: does the construction hold up. */
-  readonly exploitAdjudicator?: Verdict;
   /** Whether the independent verifier model says the flaw exists. */
   readonly verifierExists?: boolean;
   /** How many hypotheses synthesis proposes. Default 1. */
@@ -73,7 +83,6 @@ export function scriptedModel(outcomes: ScriptOutcomes = {}): ModelClient {
   const adjudicator = outcomes.adjudicator ?? "success";
   const verification = outcomes.verification ?? "success";
   const provable = outcomes.provable ?? true;
-  const exploitAdjudicator = outcomes.exploitAdjudicator ?? "success";
   const verifierExists = outcomes.verifierExists ?? true;
   const count = outcomes.hypotheses ?? 1;
 
@@ -84,7 +93,6 @@ export function scriptedModel(outcomes: ScriptOutcomes = {}): ModelClient {
       if (options.model === FAKE_CREDENTIALS.judgeModel) {
         if (system.includes("plausibility_judge")) return judgeReply(plausibility);
         if (system.includes("success_adjudicator")) return judgeReply(adjudicator);
-        if (system.includes("exploit_adjudicator")) return judgeReply(exploitAdjudicator);
         if (system.includes("verification_judge")) return judgeReply(verification);
         return judgeReply("inconclusive");
       }

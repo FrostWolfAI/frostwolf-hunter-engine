@@ -10,8 +10,8 @@
  * flaw is promoted only after N independent reproductions agree.
  *
  * Nothing here executes the target's code except through the `bash` tool, which runs
- * only inside the isolated container (disabled until one is configured). A run that
- * confirms nothing promotes nothing.
+ * only inside the isolated container (always on; the sandbox is never disabled). A run
+ * that confirms nothing promotes nothing.
  */
 
 import { account } from "../agent.js";
@@ -374,15 +374,20 @@ const validate: Stage = {
   },
 };
 
-// --- Stage 3b — Proof of impact (construct, then adjudicate) ----------------
+// --- Stage 3b — Proof of impact (best-effort construction) ------------------
 //
 // `validate` ruled the flaw is real against the cited code. This asks a harder
 // question: could an attacker actually trigger it, and what happens if they do.
 // The attacker model constructs a concrete input and traces it through the real
-// code (`constructProof`, in `exploit.ts`); a judge then rules on that specific
-// construction, not the underlying claim validate already settled. A hypothesis
-// that cannot be turned into a concrete demonstration is dropped here rather than
-// carried forward on the strength of the claim alone.
+// code (`constructProof`, in `exploit.ts`), and the construction is attached to
+// the finding when it succeeds.
+//
+// This stage NEVER gates. Every confirmed hypothesis is carried forward to
+// independent verification whether or not a proof was built, so the
+// recon → synthesis → validate → verify flow runs end to end every time. A missing
+// proof weakens a finding's evidence; it does not drop the finding. (Turning a
+// constructed proof into an executed one is the live-exploitation layer tracked in
+// HUNTER-STATUS.md; it is not this stage.)
 
 const exploitStage: Stage = {
   name: "exploit",
@@ -390,44 +395,30 @@ const exploitStage: Stage = {
     const confirmed = (ctx.scratch.confirmed as RichHypothesis[] | undefined) ?? [];
     if (confirmed.length === 0) {
       ctx.emit("info", "exploit", "nothing confirmed to prove impact for");
+      ctx.scratch.exploited = [];
       return { ok: true };
     }
 
     const exploited: RichHypothesis[] = [];
     for (const h of confirmed) {
       if (ctx.budget.exceeded()) {
-        ctx.emit("warn", "exploit", "token budget reached; stopping proof construction early");
-        break;
+        ctx.emit("warn", "exploit", `${h.code}: token budget reached; carried forward without a proof`);
+        exploited.push(h);
+        continue;
       }
 
       ctx.hypothesisStatus(h.code, "exploiting");
       const code = await gatherReferenced(ctx, h.files);
       const proof = await constructProof(ctx, h, code);
       if (proof === null) {
-        ctx.hypothesisStatus(h.code, "falsified");
-        ctx.emit("info", "exploit", `${h.code}: attacker brain could not construct a concrete proof`);
+        exploited.push(h);
+        ctx.emit("info", "exploit", `${h.code}: no concrete proof constructed; carried forward for verification`);
         continue;
       }
 
-      const judged = await ctx.judge(
-        "exploit_adjudicator",
-        "A different judge already confirmed this flaw is real in the code. Rule on THIS specific " +
-          "construction: is the attacker input concrete, and does it actually traverse the cited " +
-          "code to the claimed impact — not hand-waved, not a restatement of the mechanism?",
-        `Claim: ${h.title}\nMechanism: ${h.mechanism}\n\n` +
-          `Constructed proof:\n${JSON.stringify(proof)}\n\nCode:\n${code}`,
-      );
-      ctx.verdict("exploit_adjudicator", h.code, judged.verdict);
-      account(ctx, judged.totalTokens);
-
-      if (clearedVerdict(judged.verdict)) {
-        exploited.push({ ...h, proof });
-        ctx.hypothesisStatus(h.code, "exploited");
-        ctx.emit("info", "exploit", `${h.code} proven (${proof.confidence} confidence): ${proof.poc.slice(0, 200)}`);
-      } else {
-        ctx.hypothesisStatus(h.code, "falsified");
-        ctx.emit("info", "exploit", `${h.code}: construction did not hold up to adjudication`);
-      }
+      exploited.push({ ...h, proof });
+      ctx.hypothesisStatus(h.code, "exploited");
+      ctx.emit("info", "exploit", `${h.code} proof constructed (${proof.confidence} confidence): ${proof.poc.slice(0, 200)}`);
     }
 
     ctx.scratch.exploited = exploited;

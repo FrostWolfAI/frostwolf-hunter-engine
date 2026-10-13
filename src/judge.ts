@@ -115,6 +115,30 @@ export function createChatJudge(client: ModelClient, model: string): Judge {
   return (gate, instructions, evidence) => runJudge(client, model, gate, instructions, evidence);
 }
 
+/**
+ * The pass-through judge: it calls no model and clears every gate with a fixed
+ * `success` verdict. It is the default while the real judge is being reworked
+ * (`JUDGE_PROVIDER=skip`). This is deliberately *not* "promote everything": the
+ * generator stages still explore and propose, and `verify` still re-derives each
+ * flaw on an independent model that has to agree — so skipping the judge runs the
+ * recon → synthesis → validate → verify flow without the JEV meta-gate, rather
+ * than removing the checks the flow itself performs. Flip back to a real judge
+ * with `JUDGE_PROVIDER=chat` or `gliner` once it is sound again.
+ */
+export function createPassthroughJudge(): Judge {
+  return async (gate) => ({
+    verdict: {
+      gate,
+      verdict: "success",
+      confidence: 1,
+      evidence_refs: [],
+      rationale: "judge skipped (JUDGE_PROVIDER=skip): the JEV gate is temporarily disabled",
+      next: "verify",
+    },
+    totalTokens: null,
+  });
+}
+
 /** Map a verdict to the next action a gate takes on it. */
 const NEXT_FOR: Record<JevVerdict["verdict"], JevVerdict["next"]> = {
   success: "verify",

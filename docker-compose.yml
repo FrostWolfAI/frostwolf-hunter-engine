@@ -52,10 +52,14 @@ services:
       JUDGE_MODEL: ${JUDGE_MODEL:-Qwen3.8-27B-abliterated-cyber-preview-MTP-Q4_K_M.gguf}
       VERIFY_N: ${VERIFY_N:-1}
       CONCURRENCY: ${CONCURRENCY:-1}
-      # Generator runtime: "internal" (built-in agent) or "orbcode".
-      AGENT_RUNTIME: ${AGENT_RUNTIME:-internal}
-      # JEV judge backend: "chat" (LLM, default) or "gliner" (GLiNER2.5-Decide).
-      JUDGE_PROVIDER: ${JUDGE_PROVIDER:-chat}
+      # Generator runtime: "orbcode" (DEFAULT) | "claude" | "codex" | "internal".
+      # orbcode is the real runtime and must be bundled in the image with ORBCODE_BIN
+      # pointing at its bin/orbcode.js (see Dockerfile). "internal" is for tests only.
+      AGENT_RUNTIME: ${AGENT_RUNTIME:-orbcode}
+      ORBCODE_BIN: ${ORBCODE_BIN:-}
+      # JEV judge backend: "skip" (default; no judge call), "chat" (LLM), or
+      # "gliner" (GLiNER2.5-Decide). Skip is the default while the judge is reworked.
+      JUDGE_PROVIDER: ${JUDGE_PROVIDER:-skip}
       JUDGE_BASE_URL: ${JUDGE_BASE_URL:-}
     depends_on:
       redis:

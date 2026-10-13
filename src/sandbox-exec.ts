@@ -6,11 +6,11 @@
  * no network by default, a read-only root, dropped capabilities, a non-root user, and
  * CPU/memory/pid/time caps. Cloned OSS code can run arbitrary install scripts and the
  * agent driving it can be steered by hostile repo content, so host execution is never
- * an option. When no container runtime is configured the runner is **disabled** — every
- * command returns a clear "unavailable" string rather than shelling out locally.
+ * an option — the sandbox is always a container and is never disabled.
  *
- * The Docker path is written but cannot be exercised in this dev environment; it is
- * gated behind `SANDBOX_RUNTIME=docker` and defaults off. See `HUNTER-STATUS.md`.
+ * Running a command therefore requires a container runtime on the host (Docker,
+ * ideally with the gVisor OCI runtime). A command either runs in that container or
+ * fails trying to start one; there is no local fallback. See `HUNTER-STATUS.md`.
  */
 
 import { execFile } from "node:child_process";
@@ -33,7 +33,6 @@ export interface CommandRunner {
 const MAX_OUTPUT_BYTES = 16 * 1024;
 
 export interface SandboxConfig {
-  readonly runtime: "none" | "docker";
   /** Container image a run executes in. */
   readonly image: string;
   /** Docker `--runtime` (e.g. `runsc` for gVisor), or empty for the default. */
@@ -47,26 +46,10 @@ export interface SandboxConfig {
   readonly commandTimeoutMs: number;
 }
 
-/** Build the runner a run gets, given the configured runtime and its checkout. */
+/** Build the runner a run gets, bound to its checkout. The sandbox is always a container. */
 export function createCommandRunner(config: SandboxConfig, repoDir: string): CommandRunner {
-  if (config.runtime === "docker") {
-    return new DockerSandbox(config, repoDir);
-  }
-  return disabledRunner;
+  return new DockerSandbox(config, repoDir);
 }
-
-/** The default: bash is unavailable, and nothing runs on the host. */
-export const disabledRunner: CommandRunner = {
-  async exec() {
-    return {
-      stdout: "",
-      stderr: "bash is unavailable: no isolated sandbox runtime is configured for this deployment.",
-      code: null,
-      timedOut: false,
-    };
-  },
-  async dispose() {},
-};
 
 /** A command run inside a locked-down, disposable container. */
 class DockerSandbox implements CommandRunner {

@@ -50,22 +50,27 @@ export interface Config {
   readonly costPer1kTokensUsd: number;
   /** Per-run token budget; the agent stops exploring once it is spent. */
   readonly maxRunTokens: number;
-  /** Generator runtime: the built-in agent, or the orbcode harness. */
-  readonly agentRuntime: "internal" | "orbcode";
-  /** Path to the orbcode launcher (bin/orbcode.js) when agentRuntime is "orbcode". */
+  /**
+   * Generator runtime. `orbcode` (the DEFAULT) drives the orbcode harness;
+   * `claude`/`codex` are reserved for those agents and fail clearly until wired;
+   * `internal` is the built-in loop, kept for tests only. A real run uses orbcode.
+   */
+  readonly agentRuntime: "orbcode" | "claude" | "codex" | "internal";
+  /** Path to the orbcode launcher (bin/orbcode.js). Required when agentRuntime is "orbcode". */
   readonly orbcodeBin: string;
-  /** JEV judge backend: the LLM ("chat"), or GLiNER2.5-Decide ("gliner"). */
-  readonly judgeProvider: "chat" | "gliner";
+  /**
+   * JEV judge backend: `skip` (no judge call — the default while the judge is
+   * being reworked), the LLM (`chat`), or GLiNER2.5-Decide (`gliner`).
+   */
+  readonly judgeProvider: "skip" | "chat" | "gliner";
   /** GLiNER2.5-Decide base URL when judgeProvider is "gliner". */
   readonly judgeBaseUrl: string;
 
   // --- Tools -------------------------------------------------------------
-  // `bash` only runs inside an isolated container, so it is off unless a runtime
-  // is configured. `web_search` is off unless a Fireworks key is set. Both are
-  // disabled by default so nothing runs on the host and no key is assumed.
+  // `bash` always runs inside an isolated container — never the host, and never
+  // disabled. The image and OCI runtime are configurable; the sandbox itself is
+  // not optional. `web_search` is off unless a Fireworks key is set.
 
-  /** `none` (bash disabled) or `docker`. */
-  readonly sandboxRuntime: "none" | "docker";
   /** Container image a run's bash executes in. */
   readonly sandboxImage: string;
   /** OCI runtime, e.g. `runsc` for gVisor; empty for the Docker default. */
@@ -113,12 +118,23 @@ export function loadConfig(): Config {
     verifyN: intFromEnv("VERIFY_N", DEFAULT_VERIFY_N),
     costPer1kTokensUsd: floatFromEnv("COST_PER_1K_TOKENS_USD", DEFAULT_COST_PER_1K_TOKENS_USD),
     maxRunTokens: intFromEnv("MAX_RUN_TOKENS", DEFAULT_MAX_RUN_TOKENS),
-    agentRuntime: process.env.AGENT_RUNTIME === "orbcode" ? "orbcode" : "internal",
+    agentRuntime:
+      process.env.AGENT_RUNTIME === "internal"
+        ? "internal"
+        : process.env.AGENT_RUNTIME === "claude"
+          ? "claude"
+          : process.env.AGENT_RUNTIME === "codex"
+            ? "codex"
+            : "orbcode",
     orbcodeBin: process.env.ORBCODE_BIN ?? "",
-    judgeProvider: process.env.JUDGE_PROVIDER === "gliner" ? "gliner" : "chat",
+    judgeProvider:
+      process.env.JUDGE_PROVIDER === "gliner"
+        ? "gliner"
+        : process.env.JUDGE_PROVIDER === "chat"
+          ? "chat"
+          : "skip",
     judgeBaseUrl: process.env.JUDGE_BASE_URL ?? "",
 
-    sandboxRuntime: process.env.SANDBOX_RUNTIME === "docker" ? "docker" : "none",
     sandboxImage: process.env.SANDBOX_IMAGE ?? "node:22-slim",
     sandboxOciRuntime: process.env.SANDBOX_OCI_RUNTIME ?? "",
     fireworksApiKey: process.env.FIREWORKS_API_KEY ?? "",

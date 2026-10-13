@@ -4,32 +4,63 @@
  * → verify → root_cause → report) with a real model, printing the live log and the
  * findings. For an authorized assessment of a repo you control / designate.
  *
- *   node scripts/run-local.mjs <repoUrl> <baseUrl> <model>
+ * Config comes from the environment (load an .env with `node --env-file=.env`);
+ * the old positional args still work as overrides:
+ *
+ *   node --env-file=.env scripts/run-local.mjs <repoUrl>
+ *   node scripts/run-local.mjs <repoUrl> <baseUrl> <model>   # legacy, single model
+ *
+ * Env read: MATTERAI_BASE_URL, MATTERAI_API_KEY, ATTACKER_MODEL, VERIFIER_MODEL,
+ * JUDGE_MODEL, JUDGE_PROVIDER (default skip), JUDGE_BASE_URL, VERIFY_N, AGENT_RUNTIME.
  */
 import { cloneRepo } from "../dist/repo.js";
 import { executeRun } from "../dist/pipeline.js";
 
 const repoUrl = process.argv[2];
-const baseUrl = process.argv[3];
-const model = process.argv[4];
-if (!repoUrl || !baseUrl || !model) {
-  console.error("usage: run-local.mjs <repoUrl> <baseUrl> <model>");
+const baseUrl = process.argv[3] ?? process.env.MATTERAI_BASE_URL;
+const modelArg = process.argv[4]; // legacy: one model for every role
+const attackerModel = modelArg ?? process.env.ATTACKER_MODEL;
+const verifierModel = modelArg ?? process.env.VERIFIER_MODEL ?? attackerModel;
+const judgeProvider = process.env.JUDGE_PROVIDER ?? "skip";
+if (!repoUrl || !baseUrl || !attackerModel) {
+  console.error(
+    "usage: node --env-file=.env scripts/run-local.mjs <repoUrl>\n" +
+      "   or: node scripts/run-local.mjs <repoUrl> <baseUrl> <model>\n" +
+      "need a repo URL, a base URL (arg or MATTERAI_BASE_URL), and a model (arg or ATTACKER_MODEL).",
+  );
   process.exit(2);
 }
 
 const credentials = {
-  aiProvider: "matterai",
+  aiProvider: process.env.MODEL_PROVIDER === "clef" ? "clef" : "matterai",
   aiBaseUrl: baseUrl,
-  aiApiKey: "no-key",            // server needs none; header is sent but ignored
-  attackerModel: model,
-  verifierModel: model,          // same model here (one endpoint); independence is weaker
-  judgeModel: model,
+  aiApiKey: process.env.MATTERAI_API_KEY ?? "no-key",
+  attackerModel,
+  verifierModel,
+  judgeModel: process.env.JUDGE_MODEL ?? attackerModel,
+  judgeProvider,                 // "skip" (default) calls no model; "chat"/"gliner" turn the JEV gates on
+  judgeBaseUrl: process.env.JUDGE_BASE_URL ?? "",
   verifyN: Number(process.env.VERIFY_N ?? 1),
   costPer1kTokensUsd: 0,
-  maxRunTokens: 2_000_000,       // cost governor: the agent stops once spent
-  agentRuntime: process.env.AGENT_RUNTIME === "orbcode" ? "orbcode" : "internal",
+  maxRunTokens: Number(process.env.MAX_RUN_TOKENS ?? 2_000_000), // cost governor: the agent stops once spent
+  agentRuntime:
+    process.env.AGENT_RUNTIME === "internal"
+      ? "internal"
+      : process.env.AGENT_RUNTIME === "claude"
+        ? "claude"
+        : process.env.AGENT_RUNTIME === "codex"
+          ? "codex"
+          : "orbcode", // default
   orbcodeBin: process.env.ORBCODE_BIN ?? "",
 };
+if (credentials.agentRuntime === "orbcode" && credentials.orbcodeBin.length === 0) {
+  console.error("AGENT_RUNTIME=orbcode (the default) needs ORBCODE_BIN set to bin/orbcode.js.");
+  process.exit(2);
+}
+console.log(
+  `models: attacker=${attackerModel} verifier=${verifierModel} judge=${judgeProvider}` +
+    (judgeProvider === "skip" ? " (no judge-model call)" : ` (${credentials.judgeModel})`),
+);
 
 console.log(`cloning ${repoUrl} …`);
 const repo = await cloneRepo(repoUrl);

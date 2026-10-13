@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runJudge } from "../src/judge.js";
+import { createPassthroughJudge, runJudge } from "../src/judge.js";
 import type { ModelClient } from "../src/models/types.js";
 
 function clientReturning(content: string): ModelClient {
@@ -20,6 +20,17 @@ const VALID = JSON.stringify({
   evidence_refs: ["a"],
   rationale: "clear and grounded",
   next: "verify",
+});
+
+describe("createPassthroughJudge", () => {
+  it("clears any gate with a success verdict and no model call", async () => {
+    const judge = createPassthroughJudge();
+    const result = await judge("plausibility_judge", "instructions", "evidence");
+    expect(result.verdict.gate).toBe("plausibility_judge");
+    expect(result.verdict.verdict).toBe("success");
+    expect(result.verdict.confidence).toBe(1);
+    expect(result.totalTokens).toBeNull();
+  });
 });
 
 describe("runJudge", () => {

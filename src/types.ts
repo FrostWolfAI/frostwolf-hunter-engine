@@ -40,12 +40,12 @@ export interface RunCredentials {
   readonly costPer1kTokensUsd: number;
   /** Per-run token budget; the agent stops exploring once it is spent. */
   readonly maxRunTokens: number;
-  /** Which runtime drives the generator stages: the built-in agent, or orbcode. */
-  readonly agentRuntime: "internal" | "orbcode";
-  /** Path to the orbcode launcher, when `agentRuntime` is "orbcode". */
+  /** Which runtime drives the generator stages: `orbcode` (default), `claude`/`codex` (reserved), or `internal` (tests). */
+  readonly agentRuntime: "orbcode" | "claude" | "codex" | "internal";
+  /** Path to the orbcode launcher, required when `agentRuntime` is "orbcode". */
   readonly orbcodeBin: string;
-  /** Which backend decides the JEV gates: the LLM, or GLiNER2.5-Decide. */
-  readonly judgeProvider: "chat" | "gliner";
+  /** Which backend decides the JEV gates: `skip` (no judge call), the LLM, or GLiNER2.5-Decide. */
+  readonly judgeProvider: "skip" | "chat" | "gliner";
   /** Base URL of the GLiNER2.5-Decide service, when `judgeProvider` is "gliner". */
   readonly judgeBaseUrl: string;
 }
