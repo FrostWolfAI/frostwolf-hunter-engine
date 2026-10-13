@@ -8,14 +8,16 @@
  * org id so prod knows whose data it is. The org id becomes the tenant on every
  * row, which is what the console/dashboard filters on.
  *
- *   FW_ORG_ID=<org> WORKER_URL=https://api.frostwolf.app \
+ *   FW_ORG_ID=<org> HUNTER_SECRET=<secret> MATTERAI_API_KEY=<key> \
  *     node --env-file=.env scripts/run-and-push.mjs <repoUrl>
  *
- * Env read: FW_ORG_ID (required), WORKER_URL (required — the prod gateway),
- * HUNTER_SECRET (required — the shared secret the worker authenticates with),
- * MATTERAI_BASE_URL, MATTERAI_API_KEY, ATTACKER_MODEL, VERIFIER_MODEL, JUDGE_MODEL,
- * JUDGE_PROVIDER (default skip), AGENT_RUNTIME (default orbcode), ORBCODE_BIN,
- * VERIFY_N, RUN_TIMEOUT_MS, SANDBOX_IMAGE.
+ * Connecting to prod is the default — WORKER_URL and MATTERAI_BASE_URL already point
+ * at prod, so a local run needs only the org id, the shared secret, and the model
+ * key. Env read: FW_ORG_ID (required), HUNTER_SECRET (required), MATTERAI_API_KEY
+ * (required), WORKER_URL (default https://api.frostwolf.app), MATTERAI_BASE_URL
+ * (default the prod matterai endpoint), ATTACKER_MODEL/VERIFIER_MODEL (default
+ * frost-abliterated-cyber-max-1), JUDGE_PROVIDER (default skip), AGENT_RUNTIME
+ * (default orbcode), ORBCODE_BIN, VERIFY_N, RUN_TIMEOUT_MS.
  *
  * Prereqs on the prod side: the three D1 migrations applied, the worker's
  * `/internal/d1` deployed, and HUNTER_SECRET matching. Without them the first
@@ -34,10 +36,11 @@ import { createCommandRunner } from "../dist/sandbox-exec.js";
 
 const repo = process.argv[2];
 const org = process.env.FW_ORG_ID;
-const workerUrl = (process.env.WORKER_URL ?? "").replace(/\/$/, "");
+// Prod is the default: a local run connects to prod with no WORKER_URL/base override.
+const workerUrl = (process.env.WORKER_URL ?? "https://api.frostwolf.app").replace(/\/$/, "");
 const secret = process.env.HUNTER_SECRET ?? "";
-const baseUrl = process.env.MATTERAI_BASE_URL;
-const attackerModel = process.env.ATTACKER_MODEL;
+const baseUrl = process.env.MATTERAI_BASE_URL ?? "https://api2.matterai.so/v1";
+const attackerModel = process.env.ATTACKER_MODEL ?? "frost-abliterated-cyber-max-1";
 const verifierModel = process.env.VERIFIER_MODEL ?? attackerModel;
 
 const runtime =
@@ -49,14 +52,16 @@ const runtime =
 const missing = [];
 if (!repo) missing.push("<repoUrl> argument");
 if (!org) missing.push("FW_ORG_ID");
-if (!workerUrl) missing.push("WORKER_URL (the prod gateway)");
 if (!secret) missing.push("HUNTER_SECRET");
-if (!baseUrl) missing.push("MATTERAI_BASE_URL");
-if (!attackerModel) missing.push("ATTACKER_MODEL");
+if (!process.env.MATTERAI_API_KEY) missing.push("MATTERAI_API_KEY");
 if (runtime === "orbcode" && !process.env.ORBCODE_BIN) missing.push("ORBCODE_BIN (orbcode is the default runtime)");
 if (missing.length > 0) {
   console.error("missing required config:\n  - " + missing.join("\n  - "));
-  console.error("\nusage: FW_ORG_ID=<org> WORKER_URL=<prod> node --env-file=.env scripts/run-and-push.mjs <repoUrl>");
+  console.error(
+    "\nusage: FW_ORG_ID=<org> HUNTER_SECRET=<secret> MATTERAI_API_KEY=<key> \\\n" +
+      "         node --env-file=.env scripts/run-and-push.mjs <repoUrl>",
+  );
+  console.error("(prod is the default: WORKER_URL and MATTERAI_BASE_URL already point at prod.)");
   process.exit(2);
 }
 

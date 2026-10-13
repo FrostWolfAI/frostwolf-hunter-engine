@@ -126,14 +126,18 @@ VERIFY_N=1
 
 ### Run without Docker
 
-Run the agent straight from the checkout — same prod-connected behavior:
+Run the agent straight from the checkout — it connects to prod by default, so you
+only pass your org id, the shared secret, and the model key:
 
 ```bash
 npm install && npm run build
-FW_ORG_ID=<org> WORKER_URL=https://api.frostwolf.app HUNTER_SECRET=<secret> \
-MATTERAI_API_KEY=<key> ORBCODE_BIN=/path/to/orbcode/bin/orbcode.js \
+FW_ORG_ID=<org> HUNTER_SECRET=<secret> MATTERAI_API_KEY=<key> \
+ORBCODE_BIN=/path/to/orbcode/bin/orbcode.js \
   node scripts/run-and-push.mjs https://github.com/<org>/<repo>
 ```
+
+`WORKER_URL` defaults to `https://api.frostwolf.app` and `MATTERAI_BASE_URL` to the
+prod matterai endpoint — override them only to point elsewhere.
 
 `node scripts/run-local.mjs <repo>` runs the same pipeline but prints the findings
 instead of writing to prod — a quick offline smoke test.
