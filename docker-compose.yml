@@ -10,6 +10,7 @@
 services:
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
@@ -23,10 +24,11 @@ services:
     build:
       context: .
       dockerfile: devstack/Dockerfile
+    restart: unless-stopped
     environment:
       PORT: "8787"
       HUNTER_SECRET: ${HUNTER_SECRET:-dev-secret}
-      HUNTER_URL: http://hunter:8080
+      HUNTER_URL: http://hunter:6888
       DB_PATH: /data/hunter.db
     volumes:
       - d1-data:/data
@@ -39,8 +41,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
     environment:
-      PORT: "8080"
+      PORT: "6888"
       REDIS_URL: redis://redis:6379
       HUNTER_SECRET: ${HUNTER_SECRET:-dev-secret}
       WORKER_URL: http://control-plane:8787
@@ -61,6 +64,8 @@ services:
       # "gliner" (GLiNER2.5-Decide). Skip is the default while the judge is reworked.
       JUDGE_PROVIDER: ${JUDGE_PROVIDER:-skip}
       JUDGE_BASE_URL: ${JUDGE_BASE_URL:-}
+    ports:
+      - "6888:6888" # the Hunter engine, reachable from the host
     depends_on:
       redis:
         condition: service_healthy
