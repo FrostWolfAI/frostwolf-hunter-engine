@@ -21,7 +21,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    # Always-on engine: it keeps serving the API and auto-restarts on crash/reboot.
+    # Always-on HTTP service: the gateway worker proxies /v1/hunter/* to it, and it
+    # writes back to D1 through the worker's /internal/d1. Run the service, not the
+    # one-shot script.
+    command: ["node", "dist/index.js"]
     restart: unless-stopped
     environment:
       PORT: "6888"
