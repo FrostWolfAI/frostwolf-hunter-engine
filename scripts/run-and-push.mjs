@@ -84,7 +84,6 @@ const credentials = {
   judgeBaseUrl: process.env.JUDGE_BASE_URL ?? "",
   verifyN: Number(process.env.VERIFY_N ?? 1),
   costPer1kTokensUsd: Number(process.env.COST_PER_1K_TOKENS_USD ?? 0),
-  maxRunTokens: Number(process.env.MAX_RUN_TOKENS ?? 2_000_000),
   agentRuntime: runtime,
   orbcodeBin,
 };
@@ -148,7 +147,7 @@ const result = await processRun(run.id, {
   // GCP cannot spawn; the local bundle runs the generator in-process instead).
   spawn: inProcessSpawner(createModelClient),
   credentials,
-  timeoutMs: Number(process.env.RUN_TIMEOUT_MS ?? 30 * 60_000),
+  timeoutMs: Number(process.env.RUN_TIMEOUT_MS ?? 4 * 60 * 60_000),
   capabilities: { bash: true, webSearch: false },
   makeCommandRunner,
   webSearch: disabledWebSearch,

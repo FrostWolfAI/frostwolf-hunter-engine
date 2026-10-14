@@ -65,6 +65,7 @@ export function createHandler(deps: RouteDeps): Handler {
       return await route(request, deps, tenantId, segments);
     } catch (error) {
       if (error instanceof D1Error) {
+        console.error(`[routes] D1Error on ${request.method} ${url.pathname} (tenant=${tenantId}): ${error.message}`);
         return errorResponse(503, "unavailable", "The database is unavailable.");
       }
       throw error;

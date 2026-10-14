@@ -32,19 +32,17 @@ function scriptClient(replies: string[]): { client: ModelClient; calls: Completi
 function makeCtx(
   client: ModelClient,
   brokered: { bash?: BrokeredTool; webSearch?: BrokeredTool } = {},
-): { ctx: RunContext; events: string[]; tokens: () => number } {
+): { ctx: RunContext; events: string[] } {
   const events: string[] = [];
-  let used = 0;
   const tools = buildToolset(new RepoTools(dir), brokered);
   const ctx = {
     client,
     tools,
-    budget: { add: (n: number) => (used += n), exceeded: () => used >= 1000 },
     models: { costPer1kTokensUsd: 0.001 },
     emit: (_l: string, _s: string, m: string) => events.push(m),
     spend: () => {},
   } as unknown as RunContext;
-  return { ctx, events, tokens: () => used };
+  return { ctx, events };
 }
 
 describe("runAgent", () => {

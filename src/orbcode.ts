@@ -172,6 +172,11 @@ export function createOrbcodeExplorer(
     ];
 
     let raw: Awaited<ReturnType<ExecFn>>;
+    const callNum = counter;
+    const startMs = Date.now();
+    console.log(
+      `[orbcode #${callNum}] starting stage=${task.stage} model=${task.model} resume=${resume[1] ?? "none"} cwd=${repoDir}`,
+    );
     try {
       raw = await exec(config.bin, args, {
         cwd: repoDir,
@@ -179,17 +184,27 @@ export function createOrbcodeExplorer(
         timeoutMs: config.timeoutMs,
       });
     } catch (error) {
+      console.warn(`[orbcode #${callNum}] exec threw after ${Date.now() - startMs}ms:`, error);
       emit("warn", task.stage, `orbcode run failed: ${msg(error)}`);
       return null;
     } finally {
       rmSync(outputFile, { force: true });
     }
 
+    const elapsedMs = Date.now() - startMs;
     const envelope = parseLooseJson(raw.stdout) as OrbcodeEnvelope | null;
     if (envelope === null || typeof envelope !== "object") {
+      const detail = (raw.stderr || raw.stdout).trim().slice(0, 300);
+      console.warn(
+        `[orbcode #${callNum}] non-JSON output after ${elapsedMs}ms (exit=${raw.code}): ${detail}`,
+      );
       emit("warn", task.stage, "orbcode did not return a JSON envelope");
       return null;
     }
+    const tokens = (envelope.usage?.inputTokens ?? 0) + (envelope.usage?.outputTokens ?? 0);
+    console.log(
+      `[orbcode #${callNum}] finished stage=${task.stage} ok=${envelope.ok} model=${envelope.model} tokens=${tokens} session=${envelope.sessionId ?? "none"} (${elapsedMs}ms)`,
+    );
     if (typeof envelope.usage === "object" && envelope.usage !== null) {
       onUsage((envelope.usage.inputTokens ?? 0) + (envelope.usage.outputTokens ?? 0));
     }

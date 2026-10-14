@@ -54,8 +54,6 @@ export interface RunContext {
   readonly judge: Judge;
   /** A per-run scratch pad stages use to pass state forward (e.g. the live hypothesis). */
   readonly scratch: Record<string, unknown>;
-  /** The per-run token budget guard; the agent stops exploring once it is exceeded. */
-  readonly budget: { add(tokens: number): void; exceeded(): boolean };
   emit(level: Level, stage: string, message: string): void;
   hypothesis(hypothesis: Hypothesis): void;
   hypothesisStatus(code: string, status: "queued" | "verifying" | "exploiting" | "exploited" | "confirmed" | "falsified" | "dropped"): void;

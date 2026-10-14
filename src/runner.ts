@@ -60,18 +60,22 @@ export interface RunResult {
 
 export async function processRun(runId: string, deps: RunnerDeps): Promise<RunResult> {
   const { store, live } = deps;
+  const log = (msg: string): void => console.log(`[run ${runId}] ${msg}`);
 
   if (await store.isStopped(runId)) {
+    log("already stopped before start");
     return { status: "stopped", cost: 0, findings: 0 };
   }
 
   const job = await store.getJob(runId);
   if (job === null) {
+    log("job not found or connection revoked; failing at intake");
     await store.setStatus(runId, "failed", { stage: "intake" });
     await live.end(runId, "failed");
     return { status: "failed", reason: "unknown run or revoked connection", cost: 0, findings: 0 };
   }
 
+  log(`loaded job: hunt=${job.hunt_id} tenant=${job.tenant_id} repo=${job.repoUrl ?? "<none>"} depth=${job.depth}`);
   await store.setStatus(runId, "running");
 
   // Clone the target repository before the child is spawned — only the parent can
@@ -79,9 +83,16 @@ export async function processRun(runId: string, deps: RunnerDeps): Promise<RunRe
   // never starts without the source it is meant to analyse.
   let repo: PreparedRepo | null = null;
   try {
+    if (job.repoUrl !== null) {
+      log(`cloning repo ${job.repoUrl} ...`);
+    }
     repo = await deps.prepareRepo(job);
+    if (repo !== null) {
+      log(`repo cloned to ${repo.dir}`);
+    }
   } catch (error) {
     const reason = error instanceof Error ? error.message : "repository could not be prepared";
+    log(`clone failed: ${reason}`);
     await store.appendEvents(runId, [
       { level: "error", stage: "intake", message: `clone failed: ${reason}`, ts: new Date().toISOString() },
     ]).catch(() => undefined);
@@ -153,33 +164,41 @@ export async function processRun(runId: string, deps: RunnerDeps): Promise<RunRe
   const handle = async (message: ChildMessage): Promise<void> => {
     switch (message.type) {
       case "stage":
+        log(`stage -> ${message.name}`);
         await store.setStatus(runId, "running", { stage: message.name });
         if (!stopped && (await store.isStopped(runId))) {
+          log("stop requested from console; killing child");
           stopped = true;
           run.kill();
         }
         break;
       case "event":
+        log(`[${message.event.level}] ${message.event.stage}: ${message.event.message}`);
         buffer.push(message.event);
         await live.publish(runId, message.event);
         break;
       case "hypothesis":
+        log(`hypothesis ${message.hypothesis.code} (${message.hypothesis.predicted_class}): ${message.hypothesis.rationale}`);
         await store.addHypothesis(runId, message.hypothesis);
         break;
       case "hypothesis_status":
+        log(`hypothesis ${message.code} status -> ${message.status}`);
         await store.setHypothesisStatus(runId, message.code, message.status);
         break;
       case "verdict":
+        log(`verdict ${message.gate}${message.hypothesis_code ? ` (${message.hypothesis_code})` : ""}: ${message.verdict.verdict} (confidence=${message.verdict.confidence})`);
         await store.addVerdict(runId, message.gate, message.hypothesis_code, message.verdict);
         break;
       case "finding":
         findings += 1;
+        log(`finding #${findings} [${message.finding.severity}] ${message.finding.title} (${message.finding.location})`);
         await store.addFinding(runId, message.finding);
         break;
       case "spend":
         cost += message.usd;
         break;
       case "tool_request": {
+        log(`tool_request: ${message.tool} ${JSON.stringify(message.args)}`);
         // The child cannot run these itself; the parent executes and replies.
         let result: string;
         if (message.tool === "bash") {
@@ -196,6 +215,7 @@ export async function processRun(runId: string, deps: RunnerDeps): Promise<RunRe
         break;
       }
       case "done":
+        log(`child reported done: ok=${message.ok}${message.reason ? ` reason=${message.reason}` : ""}`);
         outcome = {
           ok: message.ok,
           ...(message.reason === undefined ? {} : { reason: message.reason }),
@@ -207,6 +227,7 @@ export async function processRun(runId: string, deps: RunnerDeps): Promise<RunRe
   // The one writable directory the child gets: the orbcode runtime writes its
   // model config and reads back result files here. Per run, deleted below.
   const scratchDir = await mkdtemp(join(tmpdir(), "hunter-scratch-"));
+  log(`spawning sandboxed child (scratchDir=${scratchDir}, proxy=${proxy.url})`);
 
   const run = deps.spawn(
     {
@@ -218,7 +239,9 @@ export async function processRun(runId: string, deps: RunnerDeps): Promise<RunRe
       proxyUrl: proxy.url,
     },
     (message) => {
-      chain = chain.then(() => handle(message)).catch(() => undefined);
+      chain = chain.then(() => handle(message)).catch((err) => {
+        console.error(`[run ${runId}] error handling child message (${message.type}):`, err);
+      });
     },
   );
 

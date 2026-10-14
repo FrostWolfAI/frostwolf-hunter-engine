@@ -45,8 +45,6 @@ export interface Config {
   readonly verifyN: number;
   /** Rough cost estimate, pending real billing data from matterai.so. */
   readonly costPer1kTokensUsd: number;
-  /** Per-run token budget; the agent stops exploring once it is spent. */
-  readonly maxRunTokens: number;
   /**
    * Generator runtime. `orbcode` (the DEFAULT) drives the orbcode harness;
    * `claude`/`codex` are reserved for those agents and fail clearly until wired;
@@ -77,12 +75,11 @@ export interface Config {
   readonly fireworksBaseUrl: string;
 }
 
-const DEFAULT_PORT = 8080;
-const DEFAULT_RUN_TIMEOUT_MS = 30 * 60_000;
-const DEFAULT_VERIFY_N = 3;
+const DEFAULT_PORT = 6888;
+const DEFAULT_RUN_TIMEOUT_MS = 4 * 60 * 60_000;
+const DEFAULT_VERIFY_N = 1;
 const DEFAULT_AI_BASE_URL = "https://api2.matterai.so/v1";
 const DEFAULT_COST_PER_1K_TOKENS_USD = 0.002;
-const DEFAULT_MAX_RUN_TOKENS = 1_500_000;
 const DEFAULT_FIREWORKS_BASE_URL = "https://api.fireworks.ai";
 
 function intFromEnv(name: string, fallback: number): number {
@@ -110,7 +107,6 @@ export function loadConfig(): Config {
     judgeModel: process.env.JUDGE_MODEL ?? "",
     verifyN: intFromEnv("VERIFY_N", DEFAULT_VERIFY_N),
     costPer1kTokensUsd: floatFromEnv("COST_PER_1K_TOKENS_USD", DEFAULT_COST_PER_1K_TOKENS_USD),
-    maxRunTokens: intFromEnv("MAX_RUN_TOKENS", DEFAULT_MAX_RUN_TOKENS),
     agentRuntime:
       process.env.AGENT_RUNTIME === "internal"
         ? "internal"

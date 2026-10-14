@@ -44,7 +44,6 @@ const credentials = {
   judgeBaseUrl: process.env.JUDGE_BASE_URL ?? "",
   verifyN: Number(process.env.VERIFY_N ?? 1),
   costPer1kTokensUsd: 0,
-  maxRunTokens: Number(process.env.MAX_RUN_TOKENS ?? 2_000_000), // cost governor: the agent stops once spent
   agentRuntime:
     process.env.AGENT_RUNTIME === "internal"
       ? "internal"

@@ -9,6 +9,9 @@
  * its environment — and streams the live log from memory.
  */
 
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { loadConfig } from "./config.js";
 import { D1Client } from "./d1.js";
 import { serve } from "./http.js";
@@ -22,6 +25,96 @@ import { createStore } from "./store.js";
 import { createWebSearch } from "./web-search.js";
 import type { RunCredentials, RunJob } from "./types.js";
 
+/**
+ * Load `.env` from the current working directory if present, without overriding
+ * environment variables already set by the process manager, Docker, or shell.
+ */
+function loadDotEnvIfPresent(): void {
+  const envPath = resolve(process.cwd(), ".env");
+  if (!existsSync(envPath)) {
+    return;
+  }
+  try {
+    const content = readFileSync(envPath, "utf8");
+    for (const rawLine of content.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (line.length === 0 || line.startsWith("#")) {
+        continue;
+      }
+      const eq = line.indexOf("=");
+      if (eq <= 0) {
+        continue;
+      }
+      const key = line.slice(0, eq).trim();
+      let value = line.slice(eq + 1).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      } else {
+        const hashIdx = value.indexOf(" #");
+        if (hashIdx !== -1) {
+          value = value.slice(0, hashIdx).trim();
+        }
+      }
+      if (process.env[key] === undefined) {
+        process.env[key] = value;
+      }
+    }
+  } catch {
+    // Ignore unreadable .env and fall back to process.env
+  }
+}
+
+/**
+ * Auto-discover the orbcode CLI entrypoint (`bin/orbcode.js`) on any Linux/macOS VM
+ * when `ORBCODE_BIN` is unset or points to a path from another machine.
+ */
+function ensurePortableOrbcodeBin(): void {
+  const current = process.env.ORBCODE_BIN?.trim() ?? "";
+  if (current.length > 0 && existsSync(current)) {
+    return;
+  }
+
+  const candidates: string[] = [
+    "/usr/local/lib/node_modules/@matterailab/orbcode/bin/orbcode.js",
+    "/usr/lib/node_modules/@matterailab/orbcode/bin/orbcode.js",
+    "/opt/homebrew/lib/node_modules/@matterailab/orbcode/bin/orbcode.js",
+  ];
+
+  try {
+    const whichOut = execFileSync("which", ["orbcode"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (whichOut.length > 0 && existsSync(whichOut)) {
+      candidates.unshift(realpathSync(whichOut));
+    }
+  } catch {
+    // `orbcode` not on PATH
+  }
+
+  try {
+    const npmGlobalRoot = execFileSync("npm", ["root", "-g"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (npmGlobalRoot.length > 0) {
+      candidates.push(join(npmGlobalRoot, "@matterailab", "orbcode", "bin", "orbcode.js"));
+    }
+  } catch {
+    // npm root -g unavailable
+  }
+
+  for (const candidate of candidates) {
+    if (candidate.length > 0 && existsSync(candidate)) {
+      process.env.ORBCODE_BIN = candidate;
+      return;
+    }
+  }
+}
+
 function toCredentials(config: ReturnType<typeof loadConfig>): RunCredentials {
   return {
     aiProvider: config.aiProvider,
@@ -32,7 +125,6 @@ function toCredentials(config: ReturnType<typeof loadConfig>): RunCredentials {
     judgeModel: config.judgeModel,
     verifyN: config.verifyN,
     costPer1kTokensUsd: config.costPer1kTokensUsd,
-    maxRunTokens: config.maxRunTokens,
     agentRuntime: config.agentRuntime,
     orbcodeBin: config.orbcodeBin,
     judgeProvider: config.judgeProvider,
@@ -41,6 +133,18 @@ function toCredentials(config: ReturnType<typeof loadConfig>): RunCredentials {
 }
 
 async function main(): Promise<void> {
+  loadDotEnvIfPresent();
+  ensurePortableOrbcodeBin();
+  if (!process.env.ATTACKER_MODEL) {
+    process.env.ATTACKER_MODEL = "frost-abliterated-cyber-max-1";
+  }
+  if (!process.env.VERIFIER_MODEL) {
+    process.env.VERIFIER_MODEL = "frost-abliterated-cyber-max-1";
+  }
+  if (!process.env.JUDGE_MODEL) {
+    process.env.JUDGE_MODEL = "fastino/gliner2.5-decide-free";
+  }
+
   const config = loadConfig();
   if (config.secret.length === 0) {
     throw new Error("HUNTER_SECRET is required.");
@@ -94,6 +198,7 @@ async function main(): Promise<void> {
   // Fire-and-forget: the HTTP response returns 202 immediately and the client
   // follows the live log; a crash surfaces in the run's own events and status.
   const execute = (runId: string): void => {
+    console.log(`[hunter] kicking off run ${runId}`);
     void processRun(runId, {
       store,
       live,
@@ -104,7 +209,13 @@ async function main(): Promise<void> {
       capabilities,
       makeCommandRunner,
       webSearch,
-    }).catch((error: unknown) => console.error(`run ${runId} failed:`, error));
+    })
+      .then((res) => {
+        console.log(
+          `[hunter] run ${runId} completed: status=${res.status}${res.reason ? ` reason=${res.reason}` : ""} cost=$${res.cost.toFixed(4)} findings=${res.findings}`,
+        );
+      })
+      .catch((error: unknown) => console.error(`[hunter] run ${runId} failed:`, error));
   };
 
   const server = serve(
@@ -115,7 +226,12 @@ async function main(): Promise<void> {
       liveStream: (runId) => live.stream(runId),
     }),
   );
-  server.listen(config.port, () => console.log(`hunter listening on :${config.port}`));
+  server.listen(config.port, () => {
+    console.log(`hunter listening on :${config.port}`);
+    console.log(
+      `[hunter] config: worker=${config.workerUrl} runtime=${config.agentRuntime} orbcodeBin=${config.orbcodeBin || "<none>"} attacker=${config.attackerModel} verifier=${config.verifierModel} judge=${config.judgeProvider}(${config.judgeModel}) verifyN=${config.verifyN}`,
+    );
+  });
 
   const shutdown = (): void => {
     server.close();

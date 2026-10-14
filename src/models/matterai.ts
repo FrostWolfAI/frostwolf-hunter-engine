@@ -13,6 +13,8 @@
 import type { ChatMessage, CompletionOptions, CompletionResult, ModelClient } from "./types.js";
 
 const DEFAULT_TEMPERATURE = 0.7;
+const MAX_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 1_500;
 
 export class MatterAIClient implements ModelClient {
   constructor(
@@ -21,34 +23,56 @@ export class MatterAIClient implements ModelClient {
   ) {}
 
   async complete(options: CompletionOptions): Promise<CompletionResult> {
-    const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${this.apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: options.model,
-        messages: options.messages satisfies readonly ChatMessage[],
-        temperature: options.temperature ?? DEFAULT_TEMPERATURE,
-        ...(options.json === true ? { response_format: { type: "json_object" } } : {}),
-      }),
+    const url = `${this.baseUrl.replace(/\/$/, "")}/chat/completions`;
+    const payload = JSON.stringify({
+      model: options.model,
+      messages: options.messages satisfies readonly ChatMessage[],
+      temperature: options.temperature ?? DEFAULT_TEMPERATURE,
+      ...(options.json === true ? { response_format: { type: "json_object" } } : {}),
     });
 
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new Error(`matterai.so returned ${response.status}: ${body.slice(0, 500)}`);
-    }
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${this.apiKey}`,
+            "content-type": "application/json",
+          },
+          body: payload,
+        });
 
-    const body = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-      usage?: { total_tokens?: number };
-    };
-    const content = body.choices?.[0]?.message?.content;
-    if (typeof content !== "string") {
-      throw new Error("matterai.so response carried no message content.");
-    }
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          const err = new Error(`matterai.so returned ${response.status}: ${body.slice(0, 500)}`);
+          if ((response.status === 429 || response.status >= 500) && attempt < MAX_ATTEMPTS) {
+            lastError = err;
+            await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
+            continue;
+          }
+          throw err;
+        }
 
-    return { content, totalTokens: body.usage?.total_tokens ?? null };
+        const body = (await response.json()) as {
+          choices?: Array<{ message?: { content?: string } }>;
+          usage?: { total_tokens?: number };
+        };
+        const content = body.choices?.[0]?.message?.content;
+        if (typeof content !== "string") {
+          throw new Error("matterai.so response carried no message content.");
+        }
+
+        return { content, totalTokens: body.usage?.total_tokens ?? null };
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt < MAX_ATTEMPTS && /returned (429|5\d\d)|fetch failed|ECONNRESET/i.test(lastError.message)) {
+          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
+          continue;
+        }
+        throw lastError;
+      }
+    }
+    throw lastError ?? new Error("matterai.so request failed");
   }
 }

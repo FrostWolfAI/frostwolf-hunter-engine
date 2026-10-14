@@ -63,7 +63,7 @@ export async function runAgent<T>(ctx: RunContext, options: AgentOptions): Promi
   ];
 
   for (let step = 0; step < options.maxSteps; step++) {
-    const lastChance = step === options.maxSteps - 1 || ctx.budget.exceeded();
+    const lastChance = step === options.maxSteps - 1;
     if (lastChance) {
       messages.push({
         role: "user" as const,
@@ -124,11 +124,10 @@ export async function runAgent<T>(ctx: RunContext, options: AgentOptions): Promi
   return null;
 }
 
-/** Charge a call's tokens to the run — both the dollar meter and the budget guard. */
+/** Charge a call's tokens to the run's dollar meter. */
 export function account(ctx: RunContext, totalTokens: number | null): void {
   if (totalTokens !== null) {
     ctx.spend((totalTokens / 1000) * ctx.models.costPer1kTokensUsd);
-    ctx.budget.add(totalTokens);
   }
 }
 

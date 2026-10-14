@@ -67,6 +67,8 @@ export interface FindingView {
   readonly id: string;
   readonly hunt_id: string;
   readonly run_id: string;
+  readonly repo: string | null;
+  readonly hypothesis_code: string | null;
   readonly title: string;
   readonly severity: Severity;
   readonly novelty_class: NoveltyClass | null;

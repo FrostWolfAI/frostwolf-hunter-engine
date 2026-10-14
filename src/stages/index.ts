@@ -250,10 +250,6 @@ const synthesis: Stage = {
       if (raw.length >= MAX_HYPOTHESES) {
         break;
       }
-      if (ctx.budget.exceeded()) {
-        ctx.emit("warn", "synthesis", "token budget reached; stopping synthesis early");
-        break;
-      }
       const proposed = await ctx.explore<{ hypotheses?: RawHypothesis[] }>({
         model: ctx.models.attackerModel,
         stage: "synthesis",
@@ -411,12 +407,6 @@ const exploitStage: Stage = {
 
     const exploited: RichHypothesis[] = [];
     for (const h of confirmed) {
-      if (ctx.budget.exceeded()) {
-        ctx.emit("warn", "exploit", `${h.code}: token budget reached; carried forward without a proof`);
-        exploited.push(h);
-        continue;
-      }
-
       ctx.hypothesisStatus(h.code, "exploiting");
       const code = await gatherReferenced(ctx, h.files);
       const proof = await constructProof(ctx, h, code);
@@ -454,10 +444,6 @@ const verify: Stage = {
     for (const h of exploited) {
       let successes = 0;
       for (let attempt = 1; attempt <= n; attempt++) {
-        if (ctx.budget.exceeded()) {
-          ctx.emit("warn", "verify", "token budget exhausted; stopping verification");
-          break;
-        }
         // The verifier model explores independently (its own tool run) and is told
         // only the claim title, never the attacker's reasoning.
         const independent = await ctx.explore<{ exists?: boolean; reasoning?: string }>({
@@ -509,6 +495,33 @@ interface Verified {
   readonly h: RichHypothesis;
   readonly reproRatio: string;
   remediation?: string;
+  promoted?: boolean;
+}
+
+function promoteVerified(ctx: RunContext, v: Verified): void {
+  if (v.promoted) {
+    return;
+  }
+  v.promoted = true;
+  ctx.emit("info", "report", `promoting ${v.h.code}: ${v.h.title}`);
+  const proof = v.h.proof;
+  const evidence =
+    proof === undefined
+      ? v.h.evidence
+      : `${v.h.evidence}\n\n--- Proof of impact (${proof.confidence} confidence) ---\n` +
+        `Attacker input: ${proof.poc}\nCode path: ${proof.trace.join(" → ") || "(not cited)"}\n` +
+        `Impact: ${proof.impact}`;
+  ctx.promote({
+    title: v.h.title,
+    severity: v.h.severity,
+    novelty_class: v.h.novelty_class,
+    repro_ratio: v.reproRatio,
+    hypothesis_code: v.h.code,
+    mechanism: v.h.mechanism,
+    location: v.h.files.join(", "),
+    remediation: v.remediation ?? "",
+    evidence,
+  });
 }
 
 const rootCause: Stage = {
@@ -519,19 +532,26 @@ const rootCause: Stage = {
       ctx.emit("info", "root_cause", "nothing verified to remediate");
       return { ok: true };
     }
-    for (const v of verified) {
-      const code = await gatherReferenced(ctx, v.h.files);
-      const fix = await callJson<{ remediation?: string }>(
-        ctx,
-        ctx.models.attackerModel,
-        "root_cause",
-        "Given the vulnerability and its code, write the precise remediation: what to change and why " +
-          'it closes the flaw without breaking behaviour. Answer as {"remediation": the guidance}.',
-        `Vulnerability: ${v.h.title}\nMechanism: ${v.h.mechanism}\n\nSource:\n${code}`,
-        0.3,
+    const CONCURRENCY = 3;
+    for (let i = 0; i < verified.length; i += CONCURRENCY) {
+      const batch = verified.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        batch.map(async (v) => {
+          const code = await gatherReferenced(ctx, v.h.files);
+          const fix = await callJson<{ remediation?: string }>(
+            ctx,
+            ctx.models.attackerModel,
+            "root_cause",
+            "Given the vulnerability and its code, write the precise remediation: what to change and why " +
+              'it closes the flaw without breaking behaviour. Answer as {"remediation": the guidance}.',
+            `Vulnerability: ${v.h.title}\nMechanism: ${v.h.mechanism}\n\nSource:\n${code}`,
+            0.3,
+          );
+          v.remediation = fix?.remediation ?? "See mechanism; apply standard remediation for this class.";
+          ctx.emit("info", "root_cause", `${v.h.code}: remediation drafted`);
+          promoteVerified(ctx, v);
+        }),
       );
-      v.remediation = fix?.remediation ?? "See mechanism; apply standard remediation for this class.";
-      ctx.emit("info", "root_cause", `${v.h.code}: remediation drafted`);
     }
     ctx.scratch.verified = verified;
     return { ok: true };
@@ -549,25 +569,7 @@ const report: Stage = {
       return { ok: true };
     }
     for (const v of verified) {
-      ctx.emit("info", "report", `promoting ${v.h.code}: ${v.h.title}`);
-      const proof = v.h.proof;
-      const evidence =
-        proof === undefined
-          ? v.h.evidence
-          : `${v.h.evidence}\n\n--- Proof of impact (${proof.confidence} confidence) ---\n` +
-            `Attacker input: ${proof.poc}\nCode path: ${proof.trace.join(" → ") || "(not cited)"}\n` +
-            `Impact: ${proof.impact}`;
-      ctx.promote({
-        title: v.h.title,
-        severity: v.h.severity,
-        novelty_class: v.h.novelty_class,
-        repro_ratio: v.reproRatio,
-        hypothesis_code: v.h.code,
-        mechanism: v.h.mechanism,
-        location: v.h.files.join(", "),
-        remediation: v.remediation ?? "",
-        evidence,
-      });
+      promoteVerified(ctx, v);
     }
     return { ok: true };
   },

@@ -27,7 +27,8 @@ services:
     command: ["node", "dist/index.js"]
     restart: unless-stopped
     environment:
-      PORT: "6888"
+      PORT: "${PORT:-6888}"
+      RUN_TIMEOUT_MS: "${RUN_TIMEOUT_MS:-14400000}"
       # --- prod connection (nothing local) -----------------------------------
       WORKER_URL: ${WORKER_URL:-https://api.frostwolf.app} # prod gateway -> prod D1
       HUNTER_SECRET: ${HUNTER_SECRET:?set the prod shared secret}
@@ -42,4 +43,4 @@ services:
       # orbcode is bundled in the image; ORBCODE_BIN defaults to its install path.
       JUDGE_PROVIDER: ${JUDGE_PROVIDER:-skip}
     ports:
-      - "6888:6888" # the Hunter API, reachable from the host
+      - "${PORT:-6888}:6888" # the Hunter API, reachable from the host

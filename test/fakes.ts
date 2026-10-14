@@ -24,7 +24,6 @@ export const FAKE_CREDENTIALS: RunCredentials = {
   judgeModel: "test-judge",
   verifyN: 2,
   costPer1kTokensUsd: 0.001,
-  maxRunTokens: 1_000_000,
   agentRuntime: "internal",
   orbcodeBin: "",
   judgeProvider: "skip",

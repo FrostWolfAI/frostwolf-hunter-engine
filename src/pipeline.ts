@@ -89,16 +89,6 @@ export async function executeRun(
   };
   const toolset = buildToolset(repoTools, brokered);
 
-  let usedTokens = 0;
-  const budget = {
-    add(tokens: number): void {
-      usedTokens += tokens;
-    },
-    exceeded(): boolean {
-      return usedTokens >= credentials.maxRunTokens;
-    },
-  };
-
   const emit = (level: "debug" | "info" | "warn" | "error", stage: string, message: string): void =>
     post({ type: "event", event: { level, stage, message, ts: new Date().toISOString() } });
 
@@ -120,7 +110,6 @@ export async function executeRun(
           repoDir,
           (level, stage, message) => emit(level, stage, message),
           (tokens) => {
-            budget.add(tokens);
             post({ type: "spend", usd: (tokens / 1000) * credentials.costPer1kTokensUsd });
           },
           deps.orbcodeExec,
@@ -150,7 +139,6 @@ export async function executeRun(
     job,
     repoDir,
     tools: toolset,
-    budget,
     judge,
     models: {
       attackerModel: credentials.attackerModel,

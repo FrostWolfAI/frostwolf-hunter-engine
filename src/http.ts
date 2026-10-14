@@ -17,11 +17,22 @@ const MAX_BODY_CHARS = 1_000_000;
 export function serve(handler: Handler): Server {
   return createServer((req, res) => {
     void (async () => {
+      const startMs = Date.now();
+      const method = req.method ?? "GET";
+      const url = req.url ?? "/";
+      const tenant = req.headers["x-fw-tenant"];
       let response: Response;
       try {
         response = await handler(toRequest(req));
-      } catch {
+      } catch (err) {
+        console.error(`[http] unhandled error on ${method} ${url}:`, err);
         response = jsonResponse({ error: { type: "internal_error", code: "internal_error", message: "Internal error." } }, 500);
+      }
+
+      if (url !== "/health") {
+        console.log(
+          `[http] ${method} ${url} -> ${response.status} (${Date.now() - startMs}ms)${typeof tenant === "string" ? ` tenant=${tenant}` : ""}`,
+        );
       }
 
       res.writeHead(response.status, Object.fromEntries(response.headers));

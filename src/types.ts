@@ -38,8 +38,6 @@ export interface RunCredentials {
   readonly judgeModel: string;
   readonly verifyN: number;
   readonly costPer1kTokensUsd: number;
-  /** Per-run token budget; the agent stops exploring once it is spent. */
-  readonly maxRunTokens: number;
   /** Which runtime drives the generator stages: `orbcode` (default), `claude`/`codex` (reserved), or `internal` (tests). */
   readonly agentRuntime: "orbcode" | "claude" | "codex" | "internal";
   /** Path to the orbcode launcher, required when `agentRuntime` is "orbcode". */

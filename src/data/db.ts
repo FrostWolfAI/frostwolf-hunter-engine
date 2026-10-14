@@ -407,12 +407,22 @@ interface FindingRow {
   readonly remediation: string | null;
   readonly evidence: string | null;
   readonly created_at: string;
+  readonly scope_json: string | null;
+  readonly repos_json: string | null;
+  readonly hypothesis_code: string | null;
 }
 
 /** The finding columns both reads select. */
-const FINDING_COLUMNS =
-  "id, hunt_id, run_id, title, severity, novelty_class, cwe, owasp, repro_ratio, " +
-  "status, mechanism, location, remediation, evidence, created_at";
+const FINDING_SELECT =
+  "f.id, f.hunt_id, f.run_id, f.title, f.severity, f.novelty_class, f.cwe, f.owasp, " +
+  "f.repro_ratio, f.status, f.mechanism, f.location, f.remediation, f.evidence, " +
+  "f.created_at, h.scope_json, c.repos_json, hyp.code AS hypothesis_code";
+
+const FINDING_JOINS =
+  "FROM hunter_findings f " +
+  "LEFT JOIN hunter_hunts h ON h.id = f.hunt_id " +
+  "LEFT JOIN hunter_connections c ON c.id = h.connection_id " +
+  "LEFT JOIN hunter_hypotheses hyp ON hyp.id = f.hypothesis_id";
 
 /** List a tenant's findings, newest first. */
 export async function listFindings(
@@ -420,10 +430,10 @@ export async function listFindings(
   tenantId: string,
 ): Promise<FindingView[]> {
   const { results } = await env.DB.prepare(
-    `SELECT ${FINDING_COLUMNS}
-       FROM hunter_findings
-      WHERE tenant_id = ?1
-      ORDER BY created_at DESC`,
+    `SELECT ${FINDING_SELECT}
+       ${FINDING_JOINS}
+      WHERE f.tenant_id = ?1
+      ORDER BY f.created_at DESC`,
   )
     .bind(tenantId)
     .all<FindingRow>();
@@ -438,9 +448,9 @@ export async function getFinding(
   findingId: string,
 ): Promise<FindingView | null> {
   const row = await env.DB.prepare(
-    `SELECT ${FINDING_COLUMNS}
-       FROM hunter_findings
-      WHERE id = ?1 AND tenant_id = ?2 LIMIT 1`,
+    `SELECT ${FINDING_SELECT}
+       ${FINDING_JOINS}
+      WHERE f.id = ?1 AND f.tenant_id = ?2 LIMIT 1`,
   )
     .bind(findingId, tenantId)
     .first<FindingRow>();
@@ -464,11 +474,29 @@ export async function setFindingStatus(
   return (result.meta.changes ?? 0) > 0;
 }
 
+function resolveFindingRepo(row: FindingRow): string | null {
+  if (typeof row.scope_json === "string") {
+    const scope = parseObject(row.scope_json);
+    if (typeof scope.repo === "string" && scope.repo.length > 0) {
+      return scope.repo;
+    }
+  }
+  if (typeof row.repos_json === "string") {
+    const repos = parseArray(row.repos_json);
+    if (repos.length > 0 && repos[0]) {
+      return repos[0];
+    }
+  }
+  return null;
+}
+
 function toFindingView(row: FindingRow): FindingView {
   return {
     id: row.id,
     hunt_id: row.hunt_id,
     run_id: row.run_id,
+    repo: resolveFindingRepo(row),
+    hypothesis_code: row.hypothesis_code ?? null,
     title: row.title,
     severity: toSeverity(row.severity),
     novelty_class: toNoveltyClass(row.novelty_class),

@@ -87,7 +87,56 @@ sandboxed child routes all network traffic through this proxy via `HTTP_PROXY`/
 `HTTPS_PROXY` environment variables, providing a true network boundary that
 catches all egress, not just `fetch()` calls.
 
-## Run it locally
+## Run on any VM + Cloudflare Tunnel
+
+Hunter runs as a standalone HTTP service on port `6888` on any Linux or macOS VM and connects outbound to production D1 via `WORKER_URL` (`https://api.frostwolf.app`).
+
+### Option A: Native Node.js on any VM (recommended)
+
+```bash
+git clone https://github.com/FrostWolfAI/frostwolf-hunter-engine.git
+cd frostwolf-hunter-engine
+
+# 1. Install dependencies & global orbcode harness (auto-discovered at boot)
+npm install
+npm install -g @matterailab/orbcode
+npm run build
+
+# 2. Configure .env (auto-loaded by `npm start`)
+cp .env.example .env
+# Edit .env and set:
+#   HUNTER_SECRET=<shared secret matching frostwolf-worker>
+#   MATTERAI_API_KEY=<matterai api key>
+
+# 3. Start the service on :6888
+npm start
+```
+
+### Option B: Docker Compose on any VM
+
+```bash
+cp .env.example .env
+# Set HUNTER_SECRET and MATTERAI_API_KEY in .env
+docker compose up -d --build
+```
+
+### Tunneling from the VM (`cloudflared`)
+
+Point a Cloudflare Tunnel at `http://localhost:6888` so `frostwolf-worker` (`HUNTER_URL`) reaches the VM:
+
+```bash
+# Quick / named tunnel forwarding to local port 6888
+cloudflared tunnel run --url http://localhost:6888 <tunnel-name-or-token>
+```
+
+Verify health through the tunnel:
+
+```bash
+curl -s https://hunter-oma.frostwolf.app/health
+# -> {"status":"ok"}
+```
+
+## Run a one-shot hunt locally
 
 The local bundle runs the Hunter **agent** on your machine and writes everything to
 **production** — there is no local database, no local Redis, no local control plane.
