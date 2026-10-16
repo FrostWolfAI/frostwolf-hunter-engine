@@ -15,6 +15,7 @@
  */
 
 import { account } from "../agent.js";
+import { type CvssResult, fallbackCvssForSeverity, parseCvss } from "../cvss.js";
 import { constructProof, type ExploitProof } from "../exploit.js";
 import { parseLooseJson } from "../json.js";
 import { readRepoFile } from "../repo-read.js";
@@ -64,6 +65,9 @@ interface RichHypothesis {
   readonly title: string;
   readonly novelty_class: NoveltyClass;
   readonly severity: Severity;
+  readonly cvss: CvssResult;
+  readonly cwe?: string | undefined;
+  readonly owasp?: string | undefined;
   readonly component: string;
   readonly files: readonly string[];
   readonly mechanism: string;
@@ -233,6 +237,9 @@ interface RawHypothesis {
   readonly title?: string;
   readonly class?: string;
   readonly severity?: string;
+  readonly cvss?: unknown;
+  readonly cwe?: string;
+  readonly owasp?: string;
   readonly component?: string;
   readonly files?: unknown;
   readonly mechanism?: string;
@@ -278,8 +285,10 @@ const synthesis: Stage = {
       "tool/agent capabilities, secret/credential exposure. Do NOT report known-CVE dependency issues " +
       "or generic nits. Ground each in specific lines you actually read." +
       bountyGuidance +
-      " Your final result MUST be " +
+      " Score severity using the Common Vulnerability Scoring System (CVSS v3.1) base vector " +
+      "(e.g. \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N\"). Your final result MUST be " +
       `{"hypotheses": [{"title", "class": "A|B|C|D", "severity": "critical|high|medium|low", ` +
+      '"cvss": "CVSS:3.1/AV:.../AC:.../PR:.../UI:.../S:.../C:.../I:.../A:...", "cwe": "CWE-...", "owasp": "A01:2021-...", ' +
       '"component", "files": ["path:line"], "mechanism", "impact", "evidence": the exact code}]} ' +
       `with at most ${PER_AREA_HYPOTHESES} entries; use an empty list if this area has no real flaw.`;
 
@@ -327,11 +336,16 @@ const synthesis: Stage = {
         continue;
       }
       index += 1;
+      const fallbackSev = asSeverity(item.severity);
+      const cvss = parseCvss(item.cvss) ?? fallbackCvssForSeverity(fallbackSev);
       const rich: RichHypothesis = {
         code: `H-${String(index).padStart(3, "0")}`,
         title: item.title,
         novelty_class: asClass(item.class),
-        severity: asSeverity(item.severity),
+        severity: cvss.severity,
+        cvss,
+        cwe: typeof item.cwe === "string" && item.cwe.trim().length > 0 ? item.cwe.trim() : undefined,
+        owasp: typeof item.owasp === "string" && item.owasp.trim().length > 0 ? item.owasp.trim() : undefined,
         component: typeof item.component === "string" ? item.component : "unknown",
         files: asStringArray(item.files),
         mechanism: item.mechanism,
@@ -369,7 +383,10 @@ const synthesis: Stage = {
     }
 
     const order: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3 };
-    clearedList.sort((a, b) => order[a.severity] - order[b.severity]);
+    clearedList.sort((a, b) => {
+      const sevDiff = order[a.severity] - order[b.severity];
+      return sevDiff !== 0 ? sevDiff : b.cvss.score - a.cvss.score;
+    });
     ctx.scratch.cleared = clearedList.slice(0, MAX_QUEUED);
     ctx.emit(
       "info",
@@ -566,12 +583,15 @@ interface HackerOneReportDraft {
   readonly preconditions_and_scope?: readonly string[];
   readonly remediation_steps?: readonly string[];
   readonly impact_assessment?: string;
+  readonly cvss_vector?: string;
+  readonly cvss_score?: number;
 }
 
 interface Verified {
   readonly h: RichHypothesis;
   readonly reproRatio: string;
   remediation?: string;
+  cvss?: CvssResult;
   h1Report?: HackerOneReportDraft;
   promoted?: boolean;
 }
@@ -581,7 +601,12 @@ function promoteVerified(ctx: RunContext, v: Verified): void {
     return;
   }
   v.promoted = true;
-  ctx.emit("info", "report", `promoting ${v.h.code}: ${v.h.title}`);
+  const cvss = v.cvss ?? v.h.cvss ?? fallbackCvssForSeverity(v.h.severity);
+  ctx.emit(
+    "info",
+    "report",
+    `promoting ${v.h.code} (${cvss.severity.toUpperCase()} · CVSS ${cvss.score.toFixed(1)} ${cvss.vector}): ${v.h.title}`,
+  );
   const proof = v.h.proof;
   let evidence =
     proof === undefined
@@ -590,14 +615,26 @@ function promoteVerified(ctx: RunContext, v: Verified): void {
         `Attacker input: ${proof.poc}\nCode path: ${proof.trace.join(" → ") || "(not cited)"}\n` +
         `Impact: ${proof.impact}`;
 
+  evidence +=
+    `\n\n--- CVSS v3.1 ---\n` +
+    `Vector: ${cvss.vector}\n` +
+    `Score: ${cvss.score.toFixed(1)} (${cvss.severity.toUpperCase()})`;
+
   if (v.h1Report !== undefined && typeof v.h1Report.summary === "string" && v.h1Report.summary.trim().length > 0) {
-    evidence += `\n\n--- HackerOne Report (100% Validated) ---\n${JSON.stringify(v.h1Report)}`;
+    const enrichedH1: HackerOneReportDraft = {
+      ...v.h1Report,
+      cvss_vector: cvss.vector,
+      cvss_score: cvss.score,
+    };
+    evidence += `\n\n--- HackerOne Report (100% Validated) ---\n${JSON.stringify(enrichedH1)}`;
   }
 
   ctx.promote({
     title: v.h.title,
-    severity: v.h.severity,
+    severity: cvss.severity,
     novelty_class: v.h.novelty_class,
+    ...(v.h.cwe !== undefined ? { cwe: v.h.cwe } : {}),
+    ...(v.h.owasp !== undefined ? { owasp: v.h.owasp } : {}),
     repro_ratio: v.reproRatio,
     hypothesis_code: v.h.code,
     mechanism: v.h.mechanism,
@@ -626,25 +663,31 @@ const rootCause: Stage = {
           const validated100 = is100PercentValidated(v.reproRatio);
           const fix = await callJson<{
             remediation?: string;
+            cvss?: unknown;
             h1_report?: HackerOneReportDraft;
           }>(
             ctx,
             ctx.models.attackerModel,
             "root_cause",
             "Given the vulnerability and its code, write the precise remediation: what to change and why " +
-              "it closes the flaw without breaking behaviour." +
+              "it closes the flaw without breaking behaviour. Also score the vulnerability using the " +
+              "Common Vulnerability Scoring System (CVSS v3.1) base vector reflecting its true attack " +
+              "vector (AV), attack complexity (AC), privileges required (PR), user interaction (UI), " +
+              "scope (S), and confidentiality/integrity/availability impact (C/I/A)." +
               (validated100
                 ? " Because this finding reached 100% independent validation, also include a HackerOne-grade " +
                   "bounty submission (`h1_report`) modeled on PortSwigger/HackerOne disclosed reports: " +
-                  '{"remediation": "concise remediation", "h1_report": {"summary": "2 paragraphs: exact component/file ' +
+                  '{"remediation": "concise remediation", "cvss": "CVSS:3.1/AV:.../AC:.../PR:.../UI:.../S:.../C:.../I:.../A:...", ' +
+                  '"h1_report": {"summary": "2 paragraphs: exact component/file ' +
                   'and how attacker input reaches the sink without neutralization, followed by confirmation of the full chain and trigger conditions", ' +
                   '"poc_notes": "exact explanation of the PoC payload and why specific tokens/encodings are needed", ' +
                   '"reproduction_steps": ["1. ...", "2. ...", "3. ..."], ' +
                   '"preconditions_and_scope": ["honest bullet on required configuration/actions", "explicit bullet on what is NOT claimed"], ' +
                   '"remediation_steps": ["1. ...", "2. ...", "3. Add regression tests covering ..."], ' +
-                  '"impact_assessment": "concrete security consequence + honest severity rationale (I assess this as **Severity** because ...)"}}.'
-                : ' Answer as {"remediation": the guidance}.'),
-            `Vulnerability: ${v.h.title}\nSeverity: ${v.h.severity}\nFiles: ${v.h.files.join(", ")}\n` +
+                  '"impact_assessment": "concrete security consequence + honest CVSS v3.1 severity rationale"}}.'
+                : ' Answer as {"remediation": the guidance, "cvss": "CVSS:3.1/AV:.../AC:.../PR:.../UI:.../S:.../C:.../I:.../A:..."}.'),
+            `Vulnerability: ${v.h.title}\nInitial CVSS: ${v.h.cvss.vector} (${v.h.cvss.score.toFixed(1)} ${v.h.severity})\n` +
+              `Files: ${v.h.files.join(", ")}\n` +
               `Mechanism: ${v.h.mechanism}\nImpact: ${v.h.impact}\n` +
               (v.h.proof
                 ? `PoC Input: ${v.h.proof.poc}\nTrace: ${v.h.proof.trace.join(" -> ")}\n`
@@ -653,10 +696,19 @@ const rootCause: Stage = {
             0.3,
           );
           v.remediation = fix?.remediation ?? "See mechanism; apply standard remediation for this class.";
+          const refinedCvss =
+            parseCvss(fix?.cvss) ??
+            parseCvss(fix?.h1_report?.cvss_vector) ??
+            v.h.cvss;
+          v.cvss = refinedCvss;
           if (fix?.h1_report && typeof fix.h1_report === "object") {
             v.h1Report = fix.h1_report;
           }
-          ctx.emit("info", "root_cause", `${v.h.code}: remediation${v.h1Report ? " & HackerOne report" : ""} drafted`);
+          ctx.emit(
+            "info",
+            "root_cause",
+            `${v.h.code}: remediation & CVSS ${refinedCvss.score.toFixed(1)} (${refinedCvss.vector})${v.h1Report ? " & HackerOne report" : ""} drafted`,
+          );
           promoteVerified(ctx, v);
         }),
       );
