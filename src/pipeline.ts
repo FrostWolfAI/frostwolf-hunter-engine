@@ -92,6 +92,8 @@ export async function executeRun(
   const emit = (level: "debug" | "info" | "warn" | "error", stage: string, message: string): void =>
     post({ type: "event", event: { level, stage, message, ts: new Date().toISOString() } });
 
+  const isBounty = job.depth === "bounty" || job.policy?.mode === "bounty";
+
   // The generator substrate. orbcode (a real agent harness) when configured and a
   // repo is present; otherwise the built-in agent loop. Read-only here — the
   // `--yolo` execute mode belongs to the container sandbox, not this process.
@@ -104,7 +106,7 @@ export async function executeRun(
             apiKey: credentials.aiApiKey,
             models: [credentials.attackerModel, credentials.verifierModel],
             execute: false,
-            timeoutMs: 300_000,
+            timeoutMs: isBounty ? 600_000 : 300_000,
             scratchDir: input.scratchDir,
           },
           repoDir,
@@ -122,17 +124,21 @@ export async function executeRun(
   // gate so the recon → synthesis → validate → verify flow runs end to end while
   // the real judge is reworked; the generators and verify's independent
   // re-derivation still do their own work. `gliner` uses the decision model,
-  // `chat` the LLM. A decision model with no dedicated service is reached through
-  // the same gateway as the other roles, under the same key.
+  // `chat` the LLM. In `bounty` mode with the real model client, automatically
+  // upgrade `skip` to `chat` so every bounty candidate is strictly adjudicated.
   const viaGateway = credentials.judgeBaseUrl.length === 0;
+  const effectiveJudgeProvider =
+    isBounty && credentials.judgeProvider === "skip" && deps.makeClient === undefined
+      ? "chat"
+      : credentials.judgeProvider;
   const judge =
-    credentials.judgeProvider === "gliner"
+    effectiveJudgeProvider === "gliner"
       ? createGlinerJudge(
           viaGateway ? credentials.aiBaseUrl : credentials.judgeBaseUrl,
           viaGateway ? { apiKey: credentials.aiApiKey, model: credentials.judgeModel } : {},
         )
-      : credentials.judgeProvider === "chat"
-        ? createChatJudge(client, credentials.judgeModel)
+      : effectiveJudgeProvider === "chat"
+        ? createChatJudge(client, credentials.judgeModel || credentials.attackerModel)
         : createPassthroughJudge();
 
   const ctx: RunContext = {

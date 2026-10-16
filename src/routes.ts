@@ -29,6 +29,7 @@ import { D1Error } from "./d1.js";
 import { errorResponse, jsonResponse, readJson, type Handler } from "./http.js";
 
 const PREFIX = "/v1/hunter/";
+const BOUNTY_TENANT_ID = "tenant_yBx_9UiRaMNAIsbgeHYEOl";
 
 const TRIAGE: readonly FindingStatus[] = ["open", "confirmed", "dismissed", "fixed"];
 const TERMINAL: readonly string[] = ["completed", "failed", "stopped"];
@@ -119,12 +120,24 @@ async function route(
         if (body === null || connectionId === null) {
           return errorResponse(400, "bad_request", "`connection_id` is required.");
         }
+        const depth = asString(body.depth) ?? "standard";
+        const policy = asObject(body.policy);
+        if (
+          (depth === "bounty" || policy.mode === "bounty") &&
+          tenantId !== BOUNTY_TENANT_ID
+        ) {
+          return errorResponse(
+            403,
+            "forbidden",
+            "Bounty mode is restricted to authorized workspaces.",
+          );
+        }
         const hunt = await createHunt(env, tenantId, {
           connection_id: connectionId,
           mode: (body.mode === "continuous" ? "continuous" : "oneshot") satisfies HuntMode,
           scope: asObject(body.scope),
-          depth: asString(body.depth) ?? "standard",
-          policy: asObject(body.policy),
+          depth,
+          policy,
         });
         return hunt === null
           ? errorResponse(404, "not_found", "No such connection.")

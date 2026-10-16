@@ -42,6 +42,20 @@ const PER_AREA_STEPS = 9;
 const PER_AREA_HYPOTHESES = intEnv("HUNT_PER_AREA", 3);
 const MAX_VALIDATE_BYTES = 60 * 1024;
 
+function isBountyMode(ctx: RunContext): boolean {
+  return ctx.job.depth === "bounty" || ctx.job.policy?.mode === "bounty";
+}
+
+function is100PercentValidated(reproRatio: string): boolean {
+  const m = /^(\d+)\/(\d+)$/.exec(reproRatio.trim());
+  if (!m) {
+    return false;
+  }
+  const num = Number.parseInt(m[1]!, 10);
+  const den = Number.parseInt(m[2]!, 10);
+  return den > 0 && num === den;
+}
+
 type NoveltyClass = "A" | "B" | "C" | "D";
 type Severity = Finding["severity"];
 
@@ -112,20 +126,24 @@ function errText(error: unknown): string {
 }
 
 /** Read the files a hypothesis points at, from the checkout, under a byte cap. */
-async function gatherReferenced(ctx: RunContext, files: readonly string[]): Promise<string> {
+async function gatherReferenced(
+  ctx: RunContext,
+  files: readonly string[],
+  maxBytes = MAX_VALIDATE_BYTES,
+): Promise<string> {
   if (ctx.repoDir === null) {
     return "";
   }
   const blocks: string[] = [];
   let total = 0;
-  for (const ref of files.slice(0, 8)) {
+  for (const ref of files.slice(0, 10)) {
     const path = ref.split(":")[0]!;
     const content = await readRepoFile(ctx.repoDir, path);
     if (content === null) {
       continue;
     }
     const block = `\n--- ${path} ---\n${content}\n`;
-    if (total + block.length > MAX_VALIDATE_BYTES) {
+    if (total + block.length > maxBytes) {
       break;
     }
     blocks.push(block);
@@ -167,11 +185,18 @@ interface ThreatModel {
 const recon: Stage = {
   name: "recon",
   async run(ctx) {
-    ctx.emit("info", "recon", "exploring the repository to build a threat model");
+    const bounty = isBountyMode(ctx);
+    ctx.emit(
+      "info",
+      "recon",
+      bounty
+        ? "exploring the repository to build a threat model (bounty mode: deep untrusted-entrypoint analysis)"
+        : "exploring the repository to build a threat model",
+    );
     const model = await ctx.explore<ThreatModel>({
       model: ctx.models.attackerModel,
       stage: "recon",
-      maxSteps: RECON_STEPS,
+      maxSteps: bounty ? RECON_STEPS * 2 : RECON_STEPS,
       temperature: 0.4,
       system:
         "You are the reconnaissance stage of an authorized white-box security review of a " +
@@ -218,10 +243,13 @@ interface RawHypothesis {
 const synthesis: Stage = {
   name: "synthesis",
   async run(ctx) {
+    const bounty = isBountyMode(ctx);
+    const maxAreas = bounty ? Math.max(MAX_AREAS, 8) : MAX_AREAS;
+    const perAreaSteps = bounty ? Math.max(PER_AREA_STEPS, 16) : PER_AREA_STEPS;
     const threatModel = ctx.scratch.threatModel as ThreatModel | undefined;
     const areas = [...(threatModel?.surface ?? [])]
       .sort((a, b) => (b.exploitability ?? 0) * (b.impact ?? 0) - (a.exploitability ?? 0) * (a.impact ?? 0))
-      .slice(0, MAX_AREAS);
+      .slice(0, maxAreas);
 
     // Walk each ranked surface area with its own focused pass, so one run covers
     // the whole surface instead of whatever a single shot happened to look at.
@@ -232,6 +260,15 @@ const synthesis: Stage = {
       areas.length > 0 ? `probing ${areas.length} surface areas` : "hunting for grounded vulnerabilities",
     );
 
+    const bountyGuidance = bounty
+      ? " BOUNTY MODE: Only report vulnerabilities eligible for a HackerOne/Bugcrowd payout with a " +
+        "concrete untrusted source-to-sink path (RCE, command/argument injection, SSRF, path traversal, " +
+        "arbitrary file read/write, SQLi, SSTI, authn/authz bypass, IDOR, cross-tenant leak, HTML/script " +
+        "injection in rendered sinks, or credential disclosure). Strictly EXCLUDE defense-in-depth " +
+        "hardening, missing rate limits, missing resource quotas/NetworkPolicies, self-XSS, or issues " +
+        "requiring pre-existing administrator compromise."
+      : "";
+
     const system =
       "You are the attacker brain in an authorized white-box review. Use the tools to read code and " +
       "follow data flows across files, then report concrete architecture- or logic-level " +
@@ -239,7 +276,9 @@ const synthesis: Stage = {
       "traversal, command/argument injection, broken multi-tenant isolation, trusted client-supplied " +
       "claims, authorization/approval bypasses, SSRF, insecure direct object references, unsafe " +
       "tool/agent capabilities, secret/credential exposure. Do NOT report known-CVE dependency issues " +
-      "or generic nits. Ground each in specific lines you actually read. Your final result MUST be " +
+      "or generic nits. Ground each in specific lines you actually read." +
+      bountyGuidance +
+      " Your final result MUST be " +
       `{"hypotheses": [{"title", "class": "A|B|C|D", "severity": "critical|high|medium|low", ` +
       '"component", "files": ["path:line"], "mechanism", "impact", "evidence": the exact code}]} ' +
       `with at most ${PER_AREA_HYPOTHESES} entries; use an empty list if this area has no real flaw.`;
@@ -253,7 +292,7 @@ const synthesis: Stage = {
       const proposed = await ctx.explore<{ hypotheses?: RawHypothesis[] }>({
         model: ctx.models.attackerModel,
         stage: "synthesis",
-        maxSteps: PER_AREA_STEPS,
+        maxSteps: perAreaSteps,
         temperature: 0.8,
         system,
         task:
@@ -310,8 +349,12 @@ const synthesis: Stage = {
 
       const judged = await ctx.judge(
         "plausibility_judge",
-        "Is this a real, grounded, production-relevant vulnerability worth validating against the " +
-          "code — not speculative, not a generic nit, not a known-CVE dependency issue?",
+        bounty
+          ? "Is this a directly exploitable, bounty-eligible vulnerability with a concrete untrusted " +
+              "source-to-sink path — NOT defense-in-depth, NOT missing rate limits/quotas/NetworkPolicy, " +
+              "NOT self-XSS, and NOT requiring pre-existing admin compromise?"
+          : "Is this a real, grounded, production-relevant vulnerability worth validating against the " +
+              "code — not speculative, not a generic nit, not a known-CVE dependency issue?",
         `${JSON.stringify({ title: rich.title, mechanism: rich.mechanism, impact: rich.impact })}\n\n` +
           `Cited code:\n${rich.evidence}`,
       );
@@ -349,10 +392,12 @@ const validate: Stage = {
       return { ok: true };
     }
 
+    const bounty = isBountyMode(ctx);
+    const maxBytes = bounty ? MAX_VALIDATE_BYTES * 3 : MAX_VALIDATE_BYTES;
     const confirmed: RichHypothesis[] = [];
     for (const h of cleared) {
       ctx.hypothesisStatus(h.code, "verifying");
-      const code = await gatherReferenced(ctx, h.files);
+      const code = await gatherReferenced(ctx, h.files, maxBytes);
       if (code.length === 0) {
         ctx.hypothesisStatus(h.code, "falsified");
         ctx.emit("warn", "validate", `${h.code}: referenced files not found`);
@@ -405,14 +450,34 @@ const exploitStage: Stage = {
       return { ok: true };
     }
 
+    const bounty = isBountyMode(ctx);
+    const maxBytes = bounty ? MAX_VALIDATE_BYTES * 3 : MAX_VALIDATE_BYTES;
     const exploited: RichHypothesis[] = [];
     for (const h of confirmed) {
       ctx.hypothesisStatus(h.code, "exploiting");
-      const code = await gatherReferenced(ctx, h.files);
+      const code = await gatherReferenced(ctx, h.files, maxBytes);
       const proof = await constructProof(ctx, h, code);
       if (proof === null) {
+        if (bounty) {
+          ctx.hypothesisStatus(h.code, "falsified");
+          ctx.emit(
+            "info",
+            "exploit",
+            `${h.code}: bounty mode requires a concrete PoC; dropping hypothesis without proof`,
+          );
+          continue;
+        }
         exploited.push(h);
         ctx.emit("info", "exploit", `${h.code}: no concrete proof constructed; carried forward for verification`);
+        continue;
+      }
+      if (bounty && proof.confidence === "low") {
+        ctx.hypothesisStatus(h.code, "falsified");
+        ctx.emit(
+          "info",
+          "exploit",
+          `${h.code}: bounty mode requires medium/high PoC confidence (got low); dropping hypothesis`,
+        );
         continue;
       }
 
@@ -438,7 +503,9 @@ const verify: Stage = {
       return { ok: true };
     }
 
-    const n = Math.max(1, ctx.models.verifyN);
+    const bounty = isBountyMode(ctx);
+    const n = bounty ? Math.max(2, ctx.models.verifyN) : Math.max(1, ctx.models.verifyN);
+    const verifySteps = bounty ? Math.max(VERIFY_STEPS, 12) : VERIFY_STEPS;
     const verified: Array<{ h: RichHypothesis; reproRatio: string }> = [];
 
     for (const h of exploited) {
@@ -449,7 +516,7 @@ const verify: Stage = {
         const independent = await ctx.explore<{ exists?: boolean; reasoning?: string }>({
           model: ctx.models.verifierModel,
           stage: "verify",
-          maxSteps: VERIFY_STEPS,
+          maxSteps: verifySteps,
           temperature: 0.2,
           // A fresh session: the re-derivation must not inherit the shared
           // recon/synthesis/exploit context, or it would not be independent.
@@ -475,7 +542,8 @@ const verify: Stage = {
         }
       }
 
-      const threshold = Math.ceil(n / 2);
+      // Bounty mode requires 100% (n/n) independent verification before promotion.
+      const threshold = bounty ? n : Math.ceil(n / 2);
       ctx.emit("info", "verify", `${h.code} reproduced ${successes}/${n} (need ${threshold})`);
       if (successes >= threshold) {
         ctx.hypothesisStatus(h.code, "confirmed");
@@ -491,10 +559,20 @@ const verify: Stage = {
 
 // --- Stage 6 — Root-cause & remediation ------------------------------------
 
+interface HackerOneReportDraft {
+  readonly summary?: string;
+  readonly poc_notes?: string;
+  readonly reproduction_steps?: readonly string[];
+  readonly preconditions_and_scope?: readonly string[];
+  readonly remediation_steps?: readonly string[];
+  readonly impact_assessment?: string;
+}
+
 interface Verified {
   readonly h: RichHypothesis;
   readonly reproRatio: string;
   remediation?: string;
+  h1Report?: HackerOneReportDraft;
   promoted?: boolean;
 }
 
@@ -505,12 +583,17 @@ function promoteVerified(ctx: RunContext, v: Verified): void {
   v.promoted = true;
   ctx.emit("info", "report", `promoting ${v.h.code}: ${v.h.title}`);
   const proof = v.h.proof;
-  const evidence =
+  let evidence =
     proof === undefined
       ? v.h.evidence
       : `${v.h.evidence}\n\n--- Proof of impact (${proof.confidence} confidence) ---\n` +
         `Attacker input: ${proof.poc}\nCode path: ${proof.trace.join(" → ") || "(not cited)"}\n` +
         `Impact: ${proof.impact}`;
+
+  if (v.h1Report !== undefined && typeof v.h1Report.summary === "string" && v.h1Report.summary.trim().length > 0) {
+    evidence += `\n\n--- HackerOne Report (100% Validated) ---\n${JSON.stringify(v.h1Report)}`;
+  }
+
   ctx.promote({
     title: v.h.title,
     severity: v.h.severity,
@@ -532,23 +615,48 @@ const rootCause: Stage = {
       ctx.emit("info", "root_cause", "nothing verified to remediate");
       return { ok: true };
     }
+    const bounty = isBountyMode(ctx);
+    const maxBytes = bounty ? MAX_VALIDATE_BYTES * 3 : MAX_VALIDATE_BYTES;
     const CONCURRENCY = 3;
     for (let i = 0; i < verified.length; i += CONCURRENCY) {
       const batch = verified.slice(i, i + CONCURRENCY);
       await Promise.all(
         batch.map(async (v) => {
-          const code = await gatherReferenced(ctx, v.h.files);
-          const fix = await callJson<{ remediation?: string }>(
+          const code = await gatherReferenced(ctx, v.h.files, maxBytes);
+          const validated100 = is100PercentValidated(v.reproRatio);
+          const fix = await callJson<{
+            remediation?: string;
+            h1_report?: HackerOneReportDraft;
+          }>(
             ctx,
             ctx.models.attackerModel,
             "root_cause",
             "Given the vulnerability and its code, write the precise remediation: what to change and why " +
-              'it closes the flaw without breaking behaviour. Answer as {"remediation": the guidance}.',
-            `Vulnerability: ${v.h.title}\nMechanism: ${v.h.mechanism}\n\nSource:\n${code}`,
+              "it closes the flaw without breaking behaviour." +
+              (validated100
+                ? " Because this finding reached 100% independent validation, also include a HackerOne-grade " +
+                  "bounty submission (`h1_report`) modeled on PortSwigger/HackerOne disclosed reports: " +
+                  '{"remediation": "concise remediation", "h1_report": {"summary": "2 paragraphs: exact component/file ' +
+                  'and how attacker input reaches the sink without neutralization, followed by confirmation of the full chain and trigger conditions", ' +
+                  '"poc_notes": "exact explanation of the PoC payload and why specific tokens/encodings are needed", ' +
+                  '"reproduction_steps": ["1. ...", "2. ...", "3. ..."], ' +
+                  '"preconditions_and_scope": ["honest bullet on required configuration/actions", "explicit bullet on what is NOT claimed"], ' +
+                  '"remediation_steps": ["1. ...", "2. ...", "3. Add regression tests covering ..."], ' +
+                  '"impact_assessment": "concrete security consequence + honest severity rationale (I assess this as **Severity** because ...)"}}.'
+                : ' Answer as {"remediation": the guidance}.'),
+            `Vulnerability: ${v.h.title}\nSeverity: ${v.h.severity}\nFiles: ${v.h.files.join(", ")}\n` +
+              `Mechanism: ${v.h.mechanism}\nImpact: ${v.h.impact}\n` +
+              (v.h.proof
+                ? `PoC Input: ${v.h.proof.poc}\nTrace: ${v.h.proof.trace.join(" -> ")}\n`
+                : "") +
+              `\nSource:\n${code}`,
             0.3,
           );
           v.remediation = fix?.remediation ?? "See mechanism; apply standard remediation for this class.";
-          ctx.emit("info", "root_cause", `${v.h.code}: remediation drafted`);
+          if (fix?.h1_report && typeof fix.h1_report === "object") {
+            v.h1Report = fix.h1_report;
+          }
+          ctx.emit("info", "root_cause", `${v.h.code}: remediation${v.h1Report ? " & HackerOne report" : ""} drafted`);
           promoteVerified(ctx, v);
         }),
       );
