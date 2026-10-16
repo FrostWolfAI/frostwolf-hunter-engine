@@ -33,6 +33,7 @@ import { createModelClient } from "../dist/models/index.js";
 import { cloneRepo } from "../dist/repo.js";
 import { disabledWebSearch } from "../dist/web-search.js";
 import { createCommandRunner } from "../dist/sandbox-exec.js";
+import { resolveClaudeBin } from "../dist/claude-bin.js";
 import { resolveOrbcodeBin } from "../dist/orbcode-bin.js";
 
 const repo = process.argv[2];
@@ -52,6 +53,7 @@ const runtime =
 
 // Resolved to an absolute, existing path (or "") portably across OSes.
 const orbcodeBin = resolveOrbcodeBin(process.env.ORBCODE_BIN);
+const claudeBin = resolveClaudeBin(process.env.CLAUDE_BIN);
 
 const missing = [];
 if (!repo) missing.push("<repoUrl> argument");
@@ -62,6 +64,10 @@ if (runtime === "orbcode" && !orbcodeBin)
   missing.push(
     `ORBCODE_BIN pointing at an existing bin/orbcode.js (orbcode is the default runtime; ` +
       `ORBCODE_BIN=${process.env.ORBCODE_BIN ?? "<unset>"}), or @matterailab/orbcode installed`,
+  );
+if (runtime === "claude" && !claudeBin)
+  missing.push(
+    `CLAUDE_BIN pointing at an existing claude binary (CLAUDE_BIN=${process.env.CLAUDE_BIN ?? "<unset>"}), or claude installed on PATH`,
   );
 if (missing.length > 0) {
   console.error("missing required config:\n  - " + missing.join("\n  - "));
@@ -86,6 +92,7 @@ const credentials = {
   costPer1kTokensUsd: Number(process.env.COST_PER_1K_TOKENS_USD ?? 0),
   agentRuntime: runtime,
   orbcodeBin,
+  claudeBin,
 };
 
 // The production database, reached through the gateway worker's /internal/d1.

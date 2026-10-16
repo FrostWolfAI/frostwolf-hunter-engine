@@ -16,6 +16,7 @@
 import { writeFileSync } from "node:fs";
 import { cloneRepo } from "../dist/repo.js";
 import { executeRun } from "../dist/pipeline.js";
+import { resolveClaudeBin } from "../dist/claude-bin.js";
 import { resolveOrbcodeBin } from "../dist/orbcode-bin.js";
 
 const repoUrl = process.argv[2];
@@ -53,11 +54,19 @@ const credentials = {
           ? "codex"
           : "orbcode", // default
   orbcodeBin: resolveOrbcodeBin(process.env.ORBCODE_BIN),
+  claudeBin: resolveClaudeBin(process.env.CLAUDE_BIN),
 };
 if (credentials.agentRuntime === "orbcode" && credentials.orbcodeBin.length === 0) {
   console.error(
     `AGENT_RUNTIME=orbcode (the default) needs ORBCODE_BIN pointing at an existing bin/orbcode.js ` +
       `(ORBCODE_BIN=${process.env.ORBCODE_BIN ?? "<unset>"}), or @matterailab/orbcode installed.`,
+  );
+  process.exit(2);
+}
+if (credentials.agentRuntime === "claude" && credentials.claudeBin.length === 0) {
+  console.error(
+    `AGENT_RUNTIME=claude needs CLAUDE_BIN pointing at an existing claude binary ` +
+      `(CLAUDE_BIN=${process.env.CLAUDE_BIN ?? "<unset>"}), or claude installed on PATH.`,
   );
   process.exit(2);
 }

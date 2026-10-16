@@ -38,10 +38,12 @@ export interface RunCredentials {
   readonly judgeModel: string;
   readonly verifyN: number;
   readonly costPer1kTokensUsd: number;
-  /** Which runtime drives the generator stages: `orbcode` (default), `claude`/`codex` (reserved), or `internal` (tests). */
+  /** Which runtime drives the generator stages: `orbcode` (default), `claude`, `codex` (reserved), or `internal` (tests). */
   readonly agentRuntime: "orbcode" | "claude" | "codex" | "internal";
   /** Path to the orbcode launcher, required when `agentRuntime` is "orbcode". */
   readonly orbcodeBin: string;
+  /** Path to the claude CLI binary/script, required when `agentRuntime` is "claude". */
+  readonly claudeBin?: string | undefined;
   /** Which backend decides the JEV gates: `skip` (no judge call), the LLM, or GLiNER2.5-Decide. */
   readonly judgeProvider: "skip" | "chat" | "gliner";
   /** Base URL of the GLiNER2.5-Decide service, when `judgeProvider` is "gliner". */

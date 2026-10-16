@@ -13,6 +13,7 @@
  */
 
 import { runAgent } from "./agent.js";
+import { createClaudeExplorer } from "./claude.js";
 import { createChatJudge, createGlinerJudge, createPassthroughJudge } from "./judge.js";
 import { createModelClient, type ModelConfig } from "./models/index.js";
 import type { ModelClient } from "./models/types.js";
@@ -34,6 +35,8 @@ export interface PipelineDeps {
   readonly broker?: ToolBroker | undefined;
   /** Override how orbcode is spawned (tests inject a fake). */
   readonly orbcodeExec?: ExecFn | undefined;
+  /** Override how claude is spawned (tests inject a fake). */
+  readonly claudeExec?: ExecFn | undefined;
 }
 
 export async function executeRun(
@@ -62,20 +65,28 @@ export async function executeRun(
     return;
   }
 
-  // Generator runtime. orbcode is the default and the only wired real runtime; it
-  // NEVER silently falls back to the built-in loop. `claude`/`codex` are reserved
-  // and fail clearly until wired. `internal` is the built-in loop, for tests only.
-  if (credentials.agentRuntime === "claude" || credentials.agentRuntime === "codex") {
+  // Generator runtime. `orbcode` and `claude` are wired real runtimes; neither
+  // silently falls back to the built-in loop. `codex` is reserved and fails
+  // clearly until wired. `internal` is the built-in loop, for tests only.
+  if (credentials.agentRuntime === "codex") {
     failClosed(
-      `generator runtime "${credentials.agentRuntime}" is selected but not wired yet; use AGENT_RUNTIME=orbcode`,
+      `generator runtime "${credentials.agentRuntime}" is selected but not wired yet; use AGENT_RUNTIME=orbcode or AGENT_RUNTIME=claude`,
       "generator_runtime_not_wired",
     );
     return;
   }
+  const claudeBin = credentials.claudeBin ?? "";
   if (credentials.agentRuntime === "orbcode" && (repoDir === null || credentials.orbcodeBin.length === 0)) {
     failClosed(
       "orbcode runtime requires a cloned repository and ORBCODE_BIN; refusing to fall back to the built-in loop",
       "orbcode_unavailable",
+    );
+    return;
+  }
+  if (credentials.agentRuntime === "claude" && (repoDir === null || claudeBin.length === 0)) {
+    failClosed(
+      "claude runtime requires a cloned repository and CLAUDE_BIN; refusing to fall back to the built-in loop",
+      "claude_unavailable",
     );
     return;
   }
@@ -94,10 +105,9 @@ export async function executeRun(
 
   const isBounty = job.depth === "bounty" || job.policy?.mode === "bounty";
 
-  // The generator substrate. orbcode (a real agent harness) when configured and a
-  // repo is present; otherwise the built-in agent loop. Read-only here — the
-  // `--yolo` execute mode belongs to the container sandbox, not this process.
-  const orbcode =
+  // The generator substrate: `orbcode` or `claude` when configured and a repo is
+  // present; otherwise the built-in agent loop (`internal`).
+  const externalExplorer =
     credentials.agentRuntime === "orbcode" && repoDir !== null && credentials.orbcodeBin.length > 0
       ? createOrbcodeExplorer(
           {
@@ -116,7 +126,23 @@ export async function executeRun(
           },
           deps.orbcodeExec,
         )
-      : null;
+      : credentials.agentRuntime === "claude" && repoDir !== null && claudeBin.length > 0
+        ? createClaudeExplorer(
+            {
+              bin: claudeBin,
+              baseUrl: credentials.aiBaseUrl,
+              apiKey: credentials.aiApiKey,
+              timeoutMs: isBounty ? 600_000 : 300_000,
+              scratchDir: input.scratchDir,
+            },
+            repoDir,
+            (level, stage, message) => emit(level, stage, message),
+            (tokens) => {
+              post({ type: "spend", usd: (tokens / 1000) * credentials.costPer1kTokensUsd });
+            },
+            deps.claudeExec,
+          )
+        : null;
 
   const client = makeClient(credentials);
 
@@ -157,8 +183,8 @@ export async function executeRun(
     fetch: scopedFetch(scopeHosts(job), deps.baseFetch),
     scratch: {},
     explore: <T>(task: ExploreTask): Promise<T | null> =>
-      orbcode !== null
-        ? orbcode<T>(task)
+      externalExplorer !== null
+        ? externalExplorer<T>(task)
         : runAgent<T>(ctx, {
             model: task.model,
             system: task.system,

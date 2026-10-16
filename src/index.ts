@@ -127,6 +127,7 @@ function toCredentials(config: ReturnType<typeof loadConfig>): RunCredentials {
     costPer1kTokensUsd: config.costPer1kTokensUsd,
     agentRuntime: config.agentRuntime,
     orbcodeBin: config.orbcodeBin,
+    claudeBin: config.claudeBin,
     judgeProvider: config.judgeProvider,
     judgeBaseUrl: config.judgeBaseUrl,
   };
@@ -159,6 +160,13 @@ async function main(): Promise<void> {
       `AGENT_RUNTIME=orbcode but the orbcode launcher was not found (ORBCODE_BIN=${
         process.env.ORBCODE_BIN ?? "<unset>"
       }). Set ORBCODE_BIN to an existing bin/orbcode.js, or install @matterailab/orbcode. Every run will fail closed with orbcode_unavailable until it resolves.`,
+    );
+  }
+  if (config.agentRuntime === "claude" && config.claudeBin.length === 0) {
+    console.warn(
+      `AGENT_RUNTIME=claude but the claude CLI was not found (CLAUDE_BIN=${
+        process.env.CLAUDE_BIN ?? "<unset>"
+      }). Set CLAUDE_BIN to an existing claude binary, or install @anthropic-ai/claude-code. Every run will fail closed with claude_unavailable until it resolves.`,
     );
   }
 
@@ -229,7 +237,7 @@ async function main(): Promise<void> {
   server.listen(config.port, () => {
     console.log(`hunter listening on :${config.port}`);
     console.log(
-      `[hunter] config: worker=${config.workerUrl} runtime=${config.agentRuntime} orbcodeBin=${config.orbcodeBin || "<none>"} attacker=${config.attackerModel} verifier=${config.verifierModel} judge=${config.judgeProvider}(${config.judgeModel}) verifyN=${config.verifyN}`,
+      `[hunter] config: worker=${config.workerUrl} runtime=${config.agentRuntime} orbcodeBin=${config.orbcodeBin || "<none>"} claudeBin=${config.claudeBin || "<none>"} attacker=${config.attackerModel} verifier=${config.verifierModel} judge=${config.judgeProvider}(${config.judgeModel}) verifyN=${config.verifyN}`,
     );
   });
 

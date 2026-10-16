@@ -12,6 +12,7 @@
  * reason, so a misconfigured deploy is visible per-run rather than down entirely.
  */
 
+import { resolveClaudeBin } from "./claude-bin.js";
 import { resolveOrbcodeBin } from "./orbcode-bin.js";
 
 /** Which inference gateway a run's model calls go through. */
@@ -53,6 +54,8 @@ export interface Config {
   readonly agentRuntime: "orbcode" | "claude" | "codex" | "internal";
   /** Path to the orbcode launcher (bin/orbcode.js). Required when agentRuntime is "orbcode". */
   readonly orbcodeBin: string;
+  /** Path to the Claude Code CLI (`claude`). Required when agentRuntime is "claude". */
+  readonly claudeBin: string;
   /**
    * JEV judge backend: `skip` (no judge call — the default while the judge is
    * being reworked), the LLM (`chat`), or GLiNER2.5-Decide (`gliner`).
@@ -119,6 +122,7 @@ export function loadConfig(): Config {
     // portably across OSes. A sandboxed run child cannot touch the filesystem to
     // check, so the parent settles this here.
     orbcodeBin: resolveOrbcodeBin(process.env.ORBCODE_BIN),
+    claudeBin: resolveClaudeBin(process.env.CLAUDE_BIN),
     judgeProvider:
       process.env.JUDGE_PROVIDER === "gliner"
         ? "gliner"

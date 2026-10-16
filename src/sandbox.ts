@@ -135,10 +135,13 @@ export function forkSpawner(): Spawner {
     // permission model, so its install tree (two levels up from `bin/orbcode.js`)
     // must be granted read. Only an orbcode run resolves one; anything else leaves
     // it undefined and gets no spawn, addon, or extra-read grant.
+    const claudeBin = input.credentials.claudeBin ?? "";
     const orbcodeRoot =
       input.credentials.agentRuntime === "orbcode" && input.credentials.orbcodeBin.length > 0
         ? resolveExisting(dirname(dirname(input.credentials.orbcodeBin)))
-        : undefined;
+        : input.credentials.agentRuntime === "claude" && claudeBin.length > 0
+          ? resolveExisting(dirname(dirname(claudeBin)))
+          : undefined;
     const child = fork(childPath, [], {
       ...sandboxOptions(dirname(childPath), repoDir, input.proxyUrl, scratchDir, orbcodeRoot),
       stdio: ["ignore", "inherit", "inherit", "ipc"],
